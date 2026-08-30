@@ -1,0 +1,20 @@
+SuiteAudit - find the tests that cannot fail
+Copyright 2026 Leo Y. Zhang
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+This project has no runtime dependencies. The analysis uses Python's own `ast`
+module, which is deliberate: the tool is meant to run in someone else's CI, on a
+codebase its author has never seen, and every dependency is a reason it will not
+install there.
+
+Development-only dependencies, installed from PyPI by the user, keep their own
+licences:
+
+  ruff   MIT
+
+Why Apache-2.0 rather than the proprietary source-available terms used across
+the rest of this author's work: this is a tool intended to be run by other
+people in their own pipelines. Terms forbidding use would make it unusable for
+its stated purpose. The express patent grant in section 3 is also load-bearing
+here, given existing patents in the adjacent area of parallel mutation testing.

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install ruff
+      - name: Lint
+        run: ruff check .
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Audit itself
+        # The tool must pass its own audit. If it ever cannot, the argument it
+        # makes about everyone else's suite does not survive.
+        run: suiteaudit check tests
+
+      - name: Prove the gate can go red
+        # A gate never observed failing is decoration. The step above passing
+        # is only evidence if this one shows the same command rejects a suite
+        # that deserves rejecting -- otherwise a detector wired to nothing
+        # would look identical.
+        run: |
+          mkdir -p /tmp/vacuous
+          printf 'def test_nothing():\n    assert True\n' > /tmp/vacuous/test_bad.py
+          if suiteaudit check /tmp/vacuous; then
+            echo "::error::a suite of nothing but 'assert True' was accepted"
+            exit 1
+          fi
+          echo "rejected, as it must be"
