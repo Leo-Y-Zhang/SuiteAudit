@@ -21,8 +21,10 @@ gate finds nothing. The release is blocked until the tool clears its own bar.
 1. `pip install suiteaudit`, a pre-commit hook and a GitHub Action, all from
    one tagged release, published without any stored token.
 2. Zero false positives at high severity on the three release-candidate
-   suites (requests, click, attrs at their pinned commits), measured, with
-   every remaining high finding confirmable by reading the flagged line.
+   suites (requests, click, attrs at their pinned commits) and on the eight
+   suites of the second measurement (flask, httpx, rich, pydantic, pytest,
+   django, black, urllib3), measured, with every remaining high finding
+   confirmable by reading the flagged line.
 3. An adopter can set a single finding aside without switching the gate off,
    and the report says how many were set aside.
 4. No traceback reaches a user: an unreadable file is reported, not fatal;
@@ -30,16 +32,20 @@ gate finds nothing. The release is blocked until the tool clears its own bar.
 
 ## Non-goals
 
-- New rules. The four rules stay; the release narrows two of them.
+- New rules. The four rules stay; the release only narrows them (two after
+  the first measurement, three and the test discovery after the second).
 - SARIF output, a config file, or a baseline file. Inline comments cover the
   first-release need; the rest waits for a user to ask.
 - Executing the code under test. AST only, as before.
 
 ## Success measure
 
-The three pinned suites, audited by the release: every high finding is a true
-positive by reading. Before the fix they showed 31 high findings of which 30
-were false; the acceptance bar is zero false high findings.
+The eleven pinned suites, audited by the release: every high finding is a true
+positive by reading. Before the first fix the three release-candidate suites
+showed 31 high findings of which 30 were false; before the second, the eight
+further suites showed 36 of which 16 were false. The acceptance bar is zero
+false high findings, and both measurements are reproduced by
+`tools/case_study.py`.
 
 ## Owner steps (the only ones)
 

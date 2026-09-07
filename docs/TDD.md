@@ -20,6 +20,37 @@ generated `__eq__` and `__hash__`), 3 more of the same shape in requests, and 1
 real function, and asserted on the patch. The one true positive: attrs
 `test_hash_deprecated`, a docstring-only body.
 
+## What the second measurement found (commit 6a2d1c5, 7 Sep 2026)
+
+Eight more suites at their then-current commits, audited with the code that
+passed the first measurement:
+
+| suite | commit | tests | findings | high | verdict |
+|---|---|---|---|---|---|
+| pallets/flask | d318b68 | 372 | 10 | 0 | WARN |
+| encode/httpx | b5addb6 | 539 | 3 | 1 | FAIL |
+| Textualize/rich | 9d8f9a3 | 694 | 13 | 2 | FAIL |
+| pydantic/pydantic | 2261ae1 | 2799 | 109 | 2 | FAIL |
+| pytest-dev/pytest | 431f3e1 | 2792 | 559 | 27 | FAIL |
+| django/django | 177fb98 | 9769 | 425 | 4 | FAIL |
+| psf/black | 20622e1 | 259 | 25 | 0 | WARN |
+| urllib3/urllib3 | 278d98d | 883 | 56 | 0 | WARN |
+
+Of the 36 high findings, 16 were wrong on reading, in four shapes: 13
+`tautology` findings on `assert False` / `assert 0` fail-markers (rich 2,
+pydantic 2, pytest 9); 1 `mock-only` finding on `httpx.patch(url)`, an HTTP
+request; 1 `empty-test` finding on a method of a plain helper class no runner
+would collect (django `test_dictsort.py::User.test_method`); 1 `empty-test`
+finding under a decorator that runs the test (django
+`@test_mutation(raises=False)`). The other 20 are empty tests by the rule's
+definition: 18 pytest example fixtures under `testing/example_scripts/` and 2
+Django tests left empty so that a `setUpClass` runs.
+
+Design decisions 10-13 below record the fixes; the tests that pin them are in
+`tests/test_detectors.py::TestSecondMeasurementFalsePositives`, and every one
+was observed failing against the pre-fix code (18 failed, 97 passed) before
+the fix was written.
+
 ## Design decisions
 
 1. **Tautology stops at what the language guarantees.** `x == x` calls
@@ -65,6 +96,39 @@ real function, and asserted on the patch. The one true positive: attrs
 9. **Release without a stored secret.** `release.yml` publishes through PyPI
    trusted publishing in a `pypi` environment with `id-token: write`; the tag
    must equal `v<version>` or the build job fails before anything is built.
+10. **A false constant assertion is a fail-marker, not a tautology.**
+    `_constant_value` folds a constant expression with a small hand-written
+    evaluator (`_fold`: constants, containers, arithmetic, comparisons; never
+    `eval`, which would execute a stranger's file) and `detect_tautology`
+    reports only when the folded value is true. Folding is refused for `**`,
+    `<<`, `*`, `@`, for numbers above 10^9 and literals above 10,000
+    characters, and for anything that raises (`'a' < 1`); a refused assertion
+    is undecided and unreported. `assertEqual` / `assertAlmostEqual` /
+    `assertIs` on two constants report only when the helper would pass;
+    `assertIs` additionally only for singletons and equal immutable literals.
+11. **`patch` is a mock only when it hangs off the mock library.**
+    `mock_context` reads the file's imports once (`import unittest.mock as
+    m`, `from unittest import mock`, `from unittest.mock import patch as p`)
+    and `_is_mock_factory_call` accepts a bare factory name, a name imported
+    from the mock library, or a factory reached through `mock` /
+    `unittest.mock` / `mocker` / an import alias. `httpx.patch(...)` is a
+    call outside mocks, which also makes `mock-only` say nothing about the
+    test as a whole. Both `_mock_variables` and `_calls_outside_mocks` use the
+    same predicate so they cannot disagree.
+12. **Methods are tests only where a runner would collect them.**
+    `_is_test_class`: `Test*`, `*Test`, `*Tests`, `*TestCase`, a base whose
+    dotted name contains `Test`, or a base that is a class in the same file
+    which is itself a test class (recursive, with a cycle guard). A base
+    imported from elsewhere under a plain name is a documented miss.
+13. **An empty body under an unknown decorator is low, not high.**
+    `INERT_DECORATORS` lists the decorators that cannot run a test (markers,
+    skips, patches, settings overrides); anything else may wrap the real
+    test around the empty body, so the finding is reported with the decorator
+    as evidence at low severity. `--exclude` (globs against the path relative
+    to the root, matched against the whole path, each directory prefix and
+    the bare file name; `*` crosses `/`) covers fixture directories such as
+    pytest's `testing/example_scripts/`, and the action exposes it as
+    `exclude`.
 
 ## Test plan and evidence
 
@@ -108,6 +172,30 @@ old code before the fix was written.
   The one high finding is the true positive (`test_hash_deprecated`,
   docstring-only). The one low finding is `assert e1 is e1` in
   `test_auto_exc`. Zero false high findings, which was the acceptance bar.
+
+- **The eight suites of the second measurement, after the fix** (7 Sep 2026,
+  `python tools/case_study.py second`):
+
+  | suite | tests | findings | high | low | verdict |
+  |---|---|---|---|---|---|
+  | flask | 372 | 10 | 0 | 0 | WARN |
+  | httpx | 539 | 2 | 0 | 0 | WARN |
+  | rich | 694 | 10 | 0 | 0 | WARN |
+  | pydantic | 2799 | 105 | 0 | 0 | WARN |
+  | pytest (excluding example_scripts/*) | 2742 | 501 | 0 | 0 | WARN |
+  | django | 9745 | 423 | 2 | 1 | FAIL |
+  | black | 259 | 25 | 0 | 0 | WARN |
+  | urllib3 | 883 | 55 | 0 | 0 | WARN |
+
+  The two high findings are the deliberately empty Django tests
+  (`StaticLiveServerChecks.test_test_test`, `TestSerializeMixinUse.test_usage`);
+  the low finding is `test_not_mutated` under `@test_mutation`. The first
+  three suites re-measured by the same script are unchanged (0 / 0 / 1 high).
+  Gate on the new code: `ruff check` clean, 118 tests OK (was 88),
+  `suiteaudit verify` PASS on 118 tests, `python -m build` + `twine check`
+  PASSED on wheel and sdist. django's test count moved from 9769 to 9745
+  because 24 methods sit in classes whose base is imported under a name
+  without `Test` in it; they are missed, not misreported (design decision 7).
 
 - **Positive / negative / boundary coverage:** `tests/test_detectors.py`
   (rules fire; every false-positive shape above does not; suppression per

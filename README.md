@@ -31,8 +31,8 @@ cheapest route is a mock asserting on itself.
 
 | rule | severity | what it means |
 |---|---|---|
-| `empty-test` | high | body is empty or a docstring; always passes |
-| `tautology` | high, or low beside real assertions | `assert True`, `assertEqual(2, 2)`, `assert x is x` |
+| `empty-test` | high, or low under a decorator the tool does not know | body is empty or a docstring; always passes |
+| `tautology` | high, or low beside real assertions | `assert True`, `assertEqual(2, 2)`, `assert x is x`; never `assert False`, which is a fail-marker |
 | `mock-only` | high | every assertion inspects a mock the test itself built, and nothing but mocks and builtins is called; no production code runs |
 | `no-assertion` | medium | runs code but asserts nothing, so it only catches crashes |
 
@@ -53,6 +53,7 @@ pip install suiteaudit
 suiteaudit check .              # audit a project
 suiteaudit check tests/ lib/    # several paths, one verdict
 suiteaudit check . --json       # machine-readable, for CI
+suiteaudit check . --exclude 'fixtures/*'   # leave out example or fixture test files
 suiteaudit explain mock-only    # what a rule means and when to ignore it
 suiteaudit verify               # run the tool against itself (source checkout)
 ```
@@ -103,6 +104,7 @@ Only the changed test files are passed to the hook.
   with:
     path: tests          # default: .
     fail-on: high        # high (default), any, never
+    exclude: "fixtures/*"   # optional: globs to leave out, space-separated
 ```
 
 ## What it does not claim
@@ -168,6 +170,57 @@ Every remaining medium finding is `no-assertion` (a test that only catches
 crashes). The one high finding is the docstring-only test. The one low finding
 is `assert e1 is e1` inside a test that goes on to make real assertions: a dead
 assertion, reported as such, and not a reason to fail a gate.
+
+## The second measurement found four more
+
+Passing three suites is a small sample, so before tagging the release the tool
+was run against eight more: flask, httpx, rich, pydantic, pytest, django, black
+and urllib3, **18,107 tests**. It reported 36 high findings. Reading every one:
+
+- **13 `tautology` findings were fail-markers.** `assert False, "did not
+  raise"` in an `else:` branch, `assert 0` behind an exhausted `if/elif`, and
+  `assert False` inside a `__repr__` that must never be called. A constant
+  assertion that is false is the opposite of a tautology: reaching it *is* the
+  failure, so the test can fail. The rule now evaluates the constant (with
+  Python's own folding, never `eval`) and reports only the true ones.
+- **1 `mock-only` finding was an HTTP request.** `response = httpx.patch(url)`
+  matched the factory name `patch`. A factory name reached through an
+  attribute now counts only when the object it hangs off is the mock library
+  (`mock.patch`, `unittest.mock.MagicMock`, pytest-mock's `mocker.patch`).
+- **1 `empty-test` finding was not a test.** A plain helper class in Django's
+  suite carries a method called `test_method` as fixture data. Neither pytest
+  nor unittest would collect it, and now neither does this tool: methods count
+  only in classes a runner would collect (`Test*`, `*Tests`, `*TestCase`, or
+  a subclass of something with `Test` in its name, in this file or by name).
+- **1 `empty-test` finding sat under a decorator that runs the test.** Django's
+  `@test_mutation(raises=False)` wraps an empty body and does the asserting.
+  An empty body under a decorator the tool does not know is now low severity,
+  because the line alone cannot decide it.
+- **20 were true by the rule's definition, and 18 of them were fixture files:**
+  pytest keeps deliberately empty example tests under `testing/example_scripts/`
+  for its own collection tests. That is what `--exclude` is for, and it was
+  added for this. The other two stay flagged: Django tests that are empty on
+  purpose so that a class's `setUpClass` runs. Their comments say so, and
+  `# suiteaudit: ignore[empty-test]` is the honest way to say it to the tool.
+
+The eight suites after the fix, as printed by `python tools/case_study.py`
+(the first three suites are re-measured by the same script and are unchanged):
+
+| suite | commit | tests | findings | high | low | verdict |
+|---|---|---|---|---|---|---|
+| pallets/flask | `d318b68` | 372 | 10 | 0 | 0 | WARN |
+| encode/httpx | `b5addb6` | 539 | 2 | 0 | 0 | WARN |
+| Textualize/rich | `9d8f9a3` | 694 | 10 | 0 | 0 | WARN |
+| pydantic/pydantic | `2261ae1` | 2799 | 105 | 0 | 0 | WARN |
+| pytest-dev/pytest (excluding example_scripts/*) | `431f3e1` | 2742 | 501 | 0 | 0 | WARN |
+| django/django | `177fb98` | 9745 | 423 | 2 | 1 | FAIL |
+| psf/black | `20622e1` | 259 | 25 | 0 | 0 | WARN |
+| urllib3/urllib3 | `278d98d` | 883 | 55 | 0 | 0 | WARN |
+
+Every medium finding is `no-assertion`. The two high findings are the two
+deliberately empty Django tests; the low finding is the decorated one. Across
+all eleven suites, 19,659 tests, every high finding that remains can be
+confirmed by reading the flagged line.
 
 ## Layout
 

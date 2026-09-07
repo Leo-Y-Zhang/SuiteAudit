@@ -61,6 +61,21 @@ jobs:
           fi
           echo "NO DATA, as it must be"
 
+      - name: Prove --exclude changes the verdict, and only that
+        # The option exists so fixture directories can be left out. It is
+        # only evidence if the same tree fails without it and passes with it;
+        # a flag wired to nothing would show one verdict for both.
+        run: |
+          mkdir -p /tmp/mixed/fixtures
+          printf 'def test_real():\n    assert compute() == 4\n' > /tmp/mixed/test_ok.py
+          printf 'def test_nothing():\n    pass\n' > /tmp/mixed/fixtures/test_fixture.py
+          if suiteaudit check /tmp/mixed; then
+            echo "::error::the fixture file should have failed the gate"
+            exit 1
+          fi
+          suiteaudit check /tmp/mixed --exclude 'fixtures/*'
+          echo "excluded, as it must be"
+
   wheel:
     # The artifact strangers install, exercised the way they will use it.
     runs-on: ubuntu-latest
@@ -102,3 +117,5 @@ jobs:
         with:
           source: local
           path: tests
+          # Exercises the input's shell wiring; nothing under tests/ matches.
+          exclude: "fixtures/* example_scripts/*"

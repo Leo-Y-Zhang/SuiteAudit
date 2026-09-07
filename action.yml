@@ -14,6 +14,10 @@ inputs:
     description: "Exit non-zero on: high (default), any, or never. NO DATA always fails unless never."
     required: false
     default: "high"
+  exclude:
+    description: "Globs of files to leave out, space-separated, matched against each file's path relative to the audited path (e.g. 'example_scripts/* fixtures/*')."
+    required: false
+    default: ""
   source:
     description: "Where to install SuiteAudit from: pypi (a released version) or local (this checkout of the action repository)."
     required: false
@@ -51,6 +55,9 @@ runs:
       env:
         SA_PATH: ${{ inputs.path }}
         SA_FAIL_ON: ${{ inputs.fail-on }}
+        SA_EXCLUDE: ${{ inputs.exclude }}
       run: |
-        # Unquoted on purpose: the input is a space-separated list of paths.
-        suiteaudit check $SA_PATH --fail-on "$SA_FAIL_ON"
+        # Unquoted on purpose: the inputs are space-separated lists.
+        args=()
+        for glob in $SA_EXCLUDE; do args+=(--exclude "$glob"); done
+        suiteaudit check $SA_PATH --fail-on "$SA_FAIL_ON" "${args[@]}"
