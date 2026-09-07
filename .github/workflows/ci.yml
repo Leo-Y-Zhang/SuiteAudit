@@ -48,3 +48,57 @@ jobs:
             exit 1
           fi
           echo "rejected, as it must be"
+
+      - name: Prove a suppression comment cannot rescue an empty run
+        # `# suiteaudit: ignore` sets a finding aside; it must never turn a run
+        # that checked nothing into a PASS.
+        run: |
+          mkdir -p /tmp/ignored
+          printf '# suiteaudit: ignore\n' > /tmp/ignored/test_none.py
+          if suiteaudit check /tmp/ignored; then
+            echo "::error::a file containing only an ignore comment was accepted"
+            exit 1
+          fi
+          echo "NO DATA, as it must be"
+
+  wheel:
+    # The artifact strangers install, exercised the way they will use it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+      - name: Install the wheel into a fresh environment and run it
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/python -m pip install --quiet dist/*.whl
+          /tmp/smoke/bin/suiteaudit --version
+          /tmp/smoke/bin/suiteaudit check tests
+      - name: verify from a wheel must explain itself, not trace back
+        run: |
+          set +e
+          cd /tmp
+          /tmp/smoke/bin/suiteaudit verify 2> /tmp/verify.err
+          code=$?
+          set -e
+          cat /tmp/verify.err
+          if [ "$code" != "2" ] || ! grep -q "source checkout" /tmp/verify.err; then
+            echo "::error::verify from a wheel should exit 2 with a plain message (got $code)"
+            exit 1
+          fi
+
+  action:
+    # The composite action, from this checkout rather than from PyPI.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          source: local
+          path: tests

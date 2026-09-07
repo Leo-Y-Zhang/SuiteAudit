@@ -23,8 +23,14 @@ classifiers = [
 # own ast module.
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/Leo-Y-Zhang/SuiteAudit"
+Repository = "https://github.com/Leo-Y-Zhang/SuiteAudit"
+Issues = "https://github.com/Leo-Y-Zhang/SuiteAudit/issues"
+Changelog = "https://github.com/Leo-Y-Zhang/SuiteAudit/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
-dev = ["ruff>=0.6"]
+dev = ["ruff>=0.6", "build>=1.0", "twine>=5.0"]
 
 [project.scripts]
 suiteaudit = "suiteaudit.__main__:main"

@@ -1,0 +1,18 @@
+# pre-commit hook definition. Use it from another repository with:
+#
+#   repos:
+#     - repo: https://github.com/Leo-Y-Zhang/SuiteAudit
+#       rev: v0.1.0
+#       hooks:
+#         - id: suiteaudit
+#
+# Only the changed test files are passed in, so the hook is cheap on a large
+# repository and cannot report NO DATA (a file it was handed always exists).
+- id: suiteaudit
+  name: "SuiteAudit: tests that cannot fail"
+  description: "Report tests that could not have failed whatever the code did."
+  entry: suiteaudit check
+  language: python
+  types: [python]
+  files: '(^|/)(test_[^/]*|[^/]*_test)\.py$'
+  minimum_pre_commit_version: "2.9.0"

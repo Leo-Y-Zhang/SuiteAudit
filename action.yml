@@ -1,0 +1,56 @@
+name: "SuiteAudit"
+description: "Find the tests that cannot fail. A default-deny verdict on whether a test suite tests anything."
+author: "Leo Y. Zhang"
+branding:
+  icon: "search"
+  color: "red"
+
+inputs:
+  path:
+    description: "File(s) or directories to audit, space-separated."
+    required: false
+    default: "."
+  fail-on:
+    description: "Exit non-zero on: high (default), any, or never. NO DATA always fails unless never."
+    required: false
+    default: "high"
+  source:
+    description: "Where to install SuiteAudit from: pypi (a released version) or local (this checkout of the action repository)."
+    required: false
+    default: "pypi"
+  version:
+    description: "Version to install when source is pypi."
+    required: false
+    default: "0.1.0"
+  python-version:
+    description: "Python version to run the audit with."
+    required: false
+    default: "3.12"
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install SuiteAudit
+      shell: bash
+      env:
+        SA_SOURCE: ${{ inputs.source }}
+        SA_VERSION: ${{ inputs.version }}
+        SA_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        if [ "$SA_SOURCE" = "local" ]; then
+          python -m pip install --quiet "$SA_ACTION_PATH"
+        else
+          python -m pip install --quiet "suiteaudit==$SA_VERSION"
+        fi
+        suiteaudit --version
+    - name: Audit
+      shell: bash
+      env:
+        SA_PATH: ${{ inputs.path }}
+        SA_FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        # Unquoted on purpose: the input is a space-separated list of paths.
+        suiteaudit check $SA_PATH --fail-on "$SA_FAIL_ON"
