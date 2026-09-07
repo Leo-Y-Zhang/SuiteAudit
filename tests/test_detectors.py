@@ -5,7 +5,8 @@ Two halves, and the second matters more. The first checks that a lying test is
 caught. The second checks that an honest test is left alone -- because a tool
 that flags good tests gets switched off, and a switched-off tool finds nothing.
 Every negative case below is a real pattern that a naive implementation of
-these rules would flag.
+these rules would flag, and several of them were flagged by the first release
+candidate of this tool when it was pointed at popular open-source suites.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ import unittest
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from suiteaudit.detectors import analyse_source  # noqa: E402
+from suiteaudit.detectors import analyse_file, analyse_source  # noqa: E402
 
 
 def rules(source: str) -> list[str]:
@@ -75,8 +76,9 @@ class TestTautology(unittest.TestCase):
     def test_constant_comparison(self):
         self.assertIn("tautology", rules("def test_x():\n    assert 1 == 1\n"))
 
-    def test_same_expression_both_sides(self):
-        src = "def test_x():\n    got = compute()\n    assert got == got\n"
+    def test_identity_of_a_name_with_itself(self):
+        """`x is x` is true by the definition of `is`; no user code runs."""
+        src = "def test_x():\n    got = compute()\n    assert got is got\n"
         self.assertIn("tautology", rules(src))
 
     def test_unittest_assert_equal_with_two_constants(self):
@@ -84,15 +86,38 @@ class TestTautology(unittest.TestCase):
                "        self.assertEqual(2, 2)\n")
         self.assertIn("tautology", rules(src))
 
-    def test_unittest_assert_equal_same_expression(self):
+    def test_unittest_assert_is_same_name(self):
         src = ("class T:\n    def test_x(self):\n"
                "        got = compute()\n"
-               "        self.assertEqual(got, got)\n")
+               "        self.assertIs(got, got)\n")
         self.assertIn("tautology", rules(src))
 
     def test_assert_true_on_constant_expression(self):
         src = "def test_x():\n    assert (2 + 2) == 4\n"
         self.assertIn("tautology", rules(src))
+
+    def test_unittest_assert_true_on_a_constant(self):
+        src = ("class T:\n    def test_x(self):\n"
+               "        self.assertTrue(1)\n")
+        self.assertIn("tautology", rules(src))
+
+    def test_only_tautologies_is_high_severity(self):
+        """Every assertion is fixed, so the test cannot fail: that is FAIL."""
+        src = "def test_x():\n    assert True\n    assert 1 == 1\n"
+        findings, _ = analyse_source(src, "t.py")
+        self.assertEqual([f.severity for f in findings], ["high", "high"])
+
+    def test_dead_assertion_beside_a_real_one_is_low_severity(self):
+        """The test CAN fail, through `compute()`. The `assert True` is dead
+        weight, which is worth a note and not a failed gate. The release
+        candidate failed a popular suite's gate over `assert e1 is e1` in a
+        test that went on to make real assertions."""
+        src = ("def test_x():\n    e1 = make()\n"
+               "    assert e1 is e1\n    assert compute(e1) == 1\n")
+        findings, _ = analyse_source(src, "t.py")
+        self.assertEqual([(f.rule, f.severity) for f in findings],
+                         [("tautology", "low")])
+        self.assertIn("other assertions", findings[0].detail)
 
     # --- must NOT fire -------------------------------------------------
     def test_real_comparison_is_not_a_tautology(self):
@@ -108,6 +133,53 @@ class TestTautology(unittest.TestCase):
         expectation. Flagging this would make the tool useless."""
         src = ("class T:\n    def test_x(self):\n"
                "        self.assertEqual(compute(), 42)\n")
+        self.assertNotIn("tautology", rules(src))
+
+    def test_equality_of_a_name_with_itself_is_user_code(self):
+        """`x == x` calls `x.__eq__`, which is user code: float NaN is not
+        equal to itself, and a project that generates `__eq__` tests exactly
+        this reflexivity. The first release candidate flagged 26 such
+        assertions in one popular suite."""
+        src = "def test_x():\n    got = compute()\n    assert got == got\n"
+        self.assertNotIn("tautology", rules(src))
+
+    def test_assert_equal_of_a_name_with_itself_is_user_code(self):
+        src = ("class T:\n    def test_x(self):\n"
+               "        got = compute()\n"
+               "        self.assertEqual(got, got)\n")
+        self.assertNotIn("tautology", rules(src))
+
+    def test_equal_constructor_calls_test_the_eq_method(self):
+        """`C(1) == C(1)` builds two objects and asks the class whether they
+        are equal. That is the class's behaviour under test, not a tautology."""
+        src = "def test_x():\n    assert C(1) == C(1)\n"
+        self.assertNotIn("tautology", rules(src))
+
+    def test_equal_hash_calls_test_the_hash_method(self):
+        src = "def test_x():\n    assert hash(C(1)) == hash(C(1))\n"
+        self.assertNotIn("tautology", rules(src))
+
+    def test_equal_list_of_iterator_tests_iteration(self):
+        src = "def test_x():\n    assert list(keys) == list(keys)\n"
+        self.assertNotIn("tautology", rules(src))
+
+    def test_loop_variable_compared_to_itself_is_user_code(self):
+        src = ("def test_x():\n    for i in items:\n"
+               "        assert i == i\n")
+        self.assertNotIn("tautology", rules(src))
+
+    def test_identity_of_two_calls_is_not_fixed(self):
+        """`f(1) is f(1)` may well be two objects; whether it is one is
+        exactly what a caching test checks."""
+        src = "def test_x():\n    assert f(1) is f(1)\n"
+        self.assertNotIn("tautology", rules(src))
+
+    def test_identity_of_an_attribute_with_itself_may_run_a_property(self):
+        src = "def test_x():\n    assert obj.value is obj.value\n"
+        self.assertNotIn("tautology", rules(src))
+
+    def test_identity_of_a_subscript_with_itself_runs_getitem(self):
+        src = "def test_x():\n    assert xs[0] is xs[0]\n"
         self.assertNotIn("tautology", rules(src))
 
 
@@ -127,6 +199,27 @@ def test_x():
     svc = Mock()
     svc.total.return_value = 7
     assert svc.total() == 7
+"""
+        self.assertIn("mock-only", rules(src))
+
+    def test_builtins_do_not_count_as_production_code(self):
+        src = """
+def test_x():
+    svc = Mock()
+    svc.items.return_value = [1, 2]
+    assert len(svc.items()) == 2
+"""
+        self.assertIn("mock-only", rules(src))
+
+    def test_decorators_are_not_production_code(self):
+        """`@pytest.mark.parametrize` is a call, but not one that runs the
+        system under test; the body is still nothing but a mock."""
+        src = """
+@pytest.mark.parametrize("n", [1, 2])
+def test_x(n):
+    svc = Mock()
+    svc.run(n)
+    svc.run.assert_called_once_with(n)
 """
         self.assertIn("mock-only", rules(src))
 
@@ -150,6 +243,40 @@ def test_x():
     out = handler(client)
     client.send.assert_called_once()
     assert out.status == 200
+"""
+        self.assertNotIn("mock-only", rules(src))
+
+    def test_contract_test_that_calls_the_system_is_not_flagged(self):
+        """The system under test IS called, with the mock injected; asserting
+        that the collaborator was then used is a contract test. The first
+        release candidate flagged this shape in a popular HTTP library because
+        it only looked at the assertions, never at what else the body ran."""
+        src = """
+def test_x():
+    sender = Mock()
+    notify(sender, "hi")
+    sender.send.assert_called_once_with("hi")
+"""
+        self.assertNotIn("mock-only", rules(src))
+
+    def test_patched_collaborator_with_the_system_called_inside(self):
+        src = """
+def test_x():
+    with patch("app.utils.proxy_bypass") as bypass:
+        should_bypass_proxies("http://example.test", no_proxy=None)
+    bypass.assert_called_once_with("example.test")
+"""
+        self.assertNotIn("mock-only", rules(src))
+
+    def test_a_helper_on_self_may_run_production_code(self):
+        """`self.run_pipeline()` is not an assertion helper, so production
+        code may have run; the rule says nothing."""
+        src = """
+class T:
+    def test_x(self):
+        sink = Mock()
+        self.run_pipeline(sink)
+        sink.write.assert_called()
 """
         self.assertNotIn("mock-only", rules(src))
 
@@ -228,10 +355,6 @@ class TestRobustness(unittest.TestCase):
         self.assertEqual((findings, n), ([], 0))
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class TestAssertionsFromOtherLibraries(unittest.TestCase):
     """Regression guard for the first false positives this tool ever produced.
 
@@ -267,3 +390,62 @@ def test_x():
         still leaves the test with nothing to fail on."""
         src = "def test_x():\n    compute(1)\n"
         self.assertIn("no-assertion", rules(src))
+
+
+class TestSuppression(unittest.TestCase):
+    """`# suiteaudit: ignore[rule]` sets a finding aside; it never deletes it."""
+
+    def test_ignore_on_the_def_line_suppresses_that_rule(self):
+        src = "def test_x():  # suiteaudit: ignore[tautology]\n    assert True\n"
+        report = analyse_file(src, "t.py")
+        self.assertEqual([f.rule for f in report.findings], [])
+        self.assertEqual([f.rule for f in report.suppressed], ["tautology"])
+        self.assertEqual(report.n_tests, 1)
+
+    def test_ignore_on_the_flagged_line_suppresses_that_rule(self):
+        src = "def test_x():\n    assert True  # suiteaudit: ignore[tautology]\n"
+        report = analyse_file(src, "t.py")
+        self.assertEqual([f.rule for f in report.findings], [])
+        self.assertEqual([f.rule for f in report.suppressed], ["tautology"])
+
+    def test_bare_ignore_suppresses_every_rule(self):
+        src = "def test_x():  # suiteaudit: ignore\n    compute()\n"
+        report = analyse_file(src, "t.py")
+        self.assertEqual(report.findings, [])
+        self.assertEqual([f.rule for f in report.suppressed], ["no-assertion"])
+
+    def test_several_rules_in_one_comment(self):
+        src = ("def test_x():  # suiteaudit: ignore[no-assertion, tautology]\n"
+               "    assert True\n")
+        report = analyse_file(src, "t.py")
+        self.assertEqual(report.findings, [])
+        self.assertEqual(len(report.suppressed), 1)
+
+    # --- must NOT suppress ---------------------------------------------
+    def test_ignore_for_a_different_rule_does_not_suppress(self):
+        src = "def test_x():  # suiteaudit: ignore[mock-only]\n    assert True\n"
+        report = analyse_file(src, "t.py")
+        self.assertEqual([f.rule for f in report.findings], ["tautology"])
+        self.assertEqual(report.suppressed, [])
+
+    def test_marker_inside_a_string_is_not_a_comment(self):
+        src = ('def test_x():\n    label = "# suiteaudit: ignore"\n'
+               "    assert True\n")
+        report = analyse_file(src, "t.py")
+        self.assertEqual([f.rule for f in report.findings], ["tautology"])
+
+    def test_ignore_on_another_test_does_not_leak(self):
+        src = ("def test_a():  # suiteaudit: ignore\n    assert True\n\n"
+               "def test_b():\n    assert True\n")
+        report = analyse_file(src, "t.py")
+        self.assertEqual([f.test for f in report.findings], ["test_b"])
+        self.assertEqual([f.test for f in report.suppressed], ["test_a"])
+
+    def test_analyse_source_hides_suppressed_but_still_counts_the_test(self):
+        src = "def test_x():  # suiteaudit: ignore\n    assert True\n"
+        findings, n = analyse_source(src, "t.py")
+        self.assertEqual((findings, n), ([], 1))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

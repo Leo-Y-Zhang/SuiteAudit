@@ -19,6 +19,9 @@ a construct is ambiguous the rule is to say nothing.
 from __future__ import annotations
 
 import ast
+import io
+import re
+import tokenize
 from dataclasses import dataclass, field
 
 # Names that construct a test double. Matching on the constructor rather than
@@ -52,7 +55,22 @@ MOCK_SELF_ASSERTIONS = frozenset({
     "assert_awaited_with", "assert_awaited_once_with",
 })
 
+# Builtins that cannot be the system under test. Calling one of these in a
+# test body is not evidence that production code ran.
+BUILTIN_CALLS = frozenset({
+    "len", "str", "int", "float", "bool", "list", "dict", "set", "tuple",
+    "frozenset", "range", "print", "isinstance", "issubclass", "getattr",
+    "hasattr", "sorted", "reversed", "enumerate", "zip", "min", "max", "sum",
+    "abs", "any", "all", "iter", "next", "repr", "type", "id", "format",
+    "round", "map", "filter", "bytes", "bytearray", "divmod", "hash",
+})
+
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+# `# suiteaudit: ignore` or `# suiteaudit: ignore[rule, rule]` on the flagged
+# line or on the test's `def` line. Matched on real comment tokens, never on
+# the text of a string literal.
+SUPPRESS_RE = re.compile(r"#\s*suiteaudit:\s*ignore(?:\[([^\]]*)\])?")
 
 
 @dataclass
@@ -231,11 +249,75 @@ def _is_constant_expr(node: ast.AST) -> bool:
     return False
 
 
-def _same_expression(a: ast.AST, b: ast.AST) -> bool:
+def _same_name(a: ast.AST, b: ast.AST) -> bool:
+    """Both sides are the same plain variable.
+
+    Only a bare name qualifies. `f(1) is f(1)` runs `f` twice and may well get
+    two objects; `a.b is a.b` may run a property; `x[0] is x[0]` runs
+    `__getitem__`. Each of those is user code and can legitimately differ, so
+    none of them is a tautology.
+    """
+    return isinstance(a, ast.Name) and isinstance(b, ast.Name) and a.id == b.id
+
+
+def _calls_outside_mocks(fn, mocks: set[str], assertions: list[ast.AST]) -> bool:
+    """Does the test body call anything that is not a mock, a mock factory, an
+    assertion helper or a plain builtin?
+
+    If it does, production code may have run, and an assertion on the mock
+    afterwards may be a genuine contract test. Decorators are not scanned:
+    `@pytest.mark.parametrize` is not production code either.
+    """
+    assertion_ids = {id(a) for a in assertions}
+    for stmt in fn.body:
+        for n in ast.walk(stmt):
+            if not isinstance(n, ast.Call) or id(n) in assertion_ids:
+                continue
+            name = _attr_name(n.func)
+            root = _root_name(n.func)
+            if name in MOCK_FACTORIES or root in MOCK_FACTORIES:
+                continue
+            if root in mocks:
+                continue
+            if root == "self" and _is_assertion_name(name):
+                continue
+            if isinstance(n.func, ast.Name) and n.func.id in BUILTIN_CALLS:
+                continue
+            return True
+    return False
+
+
+def _suppressions(source: str) -> dict[int, frozenset[str] | None]:
+    """Line number -> rules suppressed there (None means every rule)."""
+    out: dict[int, frozenset[str] | None] = {}
     try:
-        return ast.dump(a) == ast.dump(b)
-    except Exception:  # noqa: BLE001 - dump is best-effort only
-        return False
+        for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+            if tok.type != tokenize.COMMENT:
+                continue
+            m = SUPPRESS_RE.match(tok.string)
+            if not m:
+                continue
+            spec = m.group(1)
+            if spec is None or not spec.strip():
+                out[tok.start[0]] = None
+            else:
+                out[tok.start[0]] = frozenset(
+                    r.strip() for r in spec.split(",") if r.strip())
+    except (tokenize.TokenError, SyntaxError):
+        # The source already parsed as Python, so this is a tokenizer corner
+        # case; treating it as "no suppressions" is the conservative reading.
+        pass
+    return out
+
+
+def _is_suppressed(finding: Finding, test: TestFunction,
+                   sup: dict[int, frozenset[str] | None]) -> bool:
+    for line in (finding.line, test.node.lineno):
+        if line in sup:
+            rules = sup[line]
+            if rules is None or finding.rule in rules:
+                return True
+    return False
 
 
 # ---------------------------------------------------------------- detectors
@@ -280,10 +362,21 @@ def detect_empty_test(test: TestFunction) -> list[Finding]:
 
 
 def detect_tautology(test: TestFunction) -> list[Finding]:
-    """Assertions whose truth is fixed at parse time.
+    """Assertions whose truth is fixed by the language before any code under
+    test runs: `assert True`, `assert 1 == 1`, `assertEqual(2, 2)`,
+    `assert x is x`.
 
-    `assert True`, `assert 1 == 1`, `assertEqual(2, 2)`, `assert x == x`. None
-    of these can be affected by the code under test.
+    `assert x == x` is deliberately NOT here. Equality calls `x.__eq__`, which
+    is user code and can legitimately return False (float NaN does), and a
+    project that generates `__eq__` tests exactly that reflexivity. The first
+    release candidate flagged 26 such assertions in one popular suite and
+    failed its gate; the rule now stops at what the language itself
+    guarantees, which is identity.
+
+    Severity is high only when EVERY assertion in the test is a tautology,
+    because only then can the test not fail. A dead `assert True` inside a
+    test with real assertions is reported at low severity: worth removing,
+    not worth failing a gate over.
     """
     out: list[Finding] = []
     fn = test.node
@@ -297,12 +390,13 @@ def detect_tautology(test: TestFunction) -> list[Finding]:
                     detail="assertion is a constant expression; it cannot fail",
                     evidence=ast.unparse(t)[:80]))
             elif (isinstance(t, ast.Compare) and len(t.comparators) == 1
-                  and isinstance(t.ops[0], (ast.Eq, ast.Is))
-                  and _same_expression(t.left, t.comparators[0])):
+                  and isinstance(t.ops[0], ast.Is)
+                  and _same_name(t.left, t.comparators[0])):
                 out.append(Finding(
                     rule="tautology", severity="high", test=test.qualified,
                     file=test.file, line=node.lineno,
-                    detail="both sides of the comparison are the same expression",
+                    detail="a name is compared to itself with `is`; identity "
+                           "is reflexive by definition",
                     evidence=ast.unparse(t)[:80]))
         elif isinstance(node, ast.Call):
             name = _attr_name(node.func)
@@ -315,19 +409,27 @@ def detect_tautology(test: TestFunction) -> list[Finding]:
                         file=test.file, line=node.lineno,
                         detail="both arguments are constants; it cannot fail",
                         evidence=ast.unparse(node)[:80]))
-                elif _same_expression(a, b):
+                elif name == "assertIs" and _same_name(a, b):
                     out.append(Finding(
                         rule="tautology", severity="high", test=test.qualified,
                         file=test.file, line=node.lineno,
-                        detail="both arguments are the same expression",
+                        detail="a name is compared to itself with assertIs; "
+                               "identity is reflexive by definition",
                         evidence=ast.unparse(node)[:80]))
-            elif name in {"assertTrue", "assertFalse"} and node.args:
-                if _is_constant_expr(node.args[0]):
-                    out.append(Finding(
-                        rule="tautology", severity="high", test=test.qualified,
-                        file=test.file, line=node.lineno,
-                        detail="argument is a constant; the assertion cannot fail",
-                        evidence=ast.unparse(node)[:80]))
+            elif name in {"assertTrue", "assertFalse"} and node.args \
+                    and _is_constant_expr(node.args[0]):
+                out.append(Finding(
+                    rule="tautology", severity="high", test=test.qualified,
+                    file=test.file, line=node.lineno,
+                    detail="argument is a constant; the assertion cannot fail",
+                    evidence=ast.unparse(node)[:80]))
+    if out and len(_assertion_nodes(fn)) > len(out):
+        # The test also carries assertions that CAN fail, so the test itself
+        # is not vacuous; the tautology is dead weight inside a real test.
+        # That is worth a note, not a failed gate.
+        for f in out:
+            f.severity = "low"
+            f.detail += "; the test can still fail through its other assertions"
     return out
 
 
@@ -338,8 +440,15 @@ def detect_mock_only(test: TestFunction) -> list[Finding]:
     double, assert the double was called, go green. It exercises no production
     code, so no change to the system can ever break it.
 
-    Reported only when *all* assertions are of this kind. A test that checks a
-    mock's call record and then also checks a real result is doing something.
+    Reported only when *all* assertions are of this kind, and only when the
+    body calls nothing but mocks, mock factories, assertion helpers and plain
+    builtins. A test that checks a mock's call record and then also checks a
+    real result is doing something; so is a test that hands the mock to the
+    system under test and then asserts the collaborator was called. That
+    second shape is a contract test, and the first release candidate flagged
+    one in a popular suite because it only looked at the assertions. If any
+    other callable runs, production code may have run, and the rule says
+    nothing.
     """
     fn = test.node
     assertions = _assertion_nodes(fn)
@@ -348,11 +457,15 @@ def detect_mock_only(test: TestFunction) -> list[Finding]:
     mocks = _mock_variables(fn)
     if not mocks:
         return []
+    if _calls_outside_mocks(fn, mocks, assertions):
+        return []
 
     def touches_only_mocks(node: ast.AST) -> bool:
         names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
-        # ignore the assertion helper's own receiver (`self` in unittest)
+        # ignore the assertion helper's own receiver (`self` in unittest) and
+        # plain builtins: `len(m.calls)` still inspects nothing but the mock.
         names.discard("self")
+        names.difference_update(BUILTIN_CALLS)
         if not names:
             return False
         return names.issubset(mocks)
@@ -385,18 +498,40 @@ DETECTORS = (detect_empty_test, detect_tautology, detect_mock_only,
              detect_no_assertion)
 
 
-def analyse_source(source: str, path: str) -> tuple[list[Finding], int]:
-    """Return (findings, number of tests) for one test file."""
+@dataclass
+class FileReport:
+    """What one test file yielded: the findings that stand, the findings a
+    `# suiteaudit: ignore` comment set aside, and how many tests were seen."""
+    findings: list[Finding] = field(default_factory=list)
+    suppressed: list[Finding] = field(default_factory=list)
+    n_tests: int = 0
+
+
+def analyse_file(source: str, path: str) -> FileReport:
+    """Analyse one test file. Raises SyntaxError if it does not parse."""
     tree = ast.parse(source, filename=path)
     tests = collect_tests(tree, path)
-    findings: list[Finding] = []
+    sup = _suppressions(source) if "suiteaudit" in source else {}
+    report = FileReport(n_tests=len(tests))
     for test in tests:
-        empty = detect_empty_test(test)
-        if empty:
+        found = detect_empty_test(test)
+        if not found:
             # An empty test is already the strongest verdict; the weaker rules
             # would only restate it.
-            findings.extend(empty)
-            continue
-        for detector in DETECTORS[1:]:
-            findings.extend(detector(test))
-    return findings, len(tests)
+            for detector in DETECTORS[1:]:
+                found.extend(detector(test))
+        for f in found:
+            if sup and _is_suppressed(f, test, sup):
+                report.suppressed.append(f)
+            else:
+                report.findings.append(f)
+    return report
+
+
+def analyse_source(source: str, path: str) -> tuple[list[Finding], int]:
+    """Return (findings, number of tests) for one test file.
+
+    Suppressed findings are not in the list; use `analyse_file` to see them.
+    """
+    report = analyse_file(source, path)
+    return report.findings, report.n_tests
