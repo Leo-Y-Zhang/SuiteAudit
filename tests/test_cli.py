@@ -138,3 +138,29 @@ class TestExplain(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestExcludeFlag(unittest.TestCase):
+    def test_exclude_removes_matching_files_from_the_verdict(self):
+        honest = "def test_real():\n    assert compute() == 4\n"
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "examples"))
+            write(d, "test_ok.py", honest)
+            write(os.path.join(d, "examples"), "test_fixture.py", VACUOUS)
+            before, _, _ = run(["check", d])
+            code, out, _ = run(["check", d, "--exclude", "examples/*"])
+        self.assertEqual(before, 1)
+        self.assertEqual(code, 0)
+        self.assertIn("VERDICT: PASS", out)
+
+    def test_exclude_is_repeatable(self):
+        honest = "def test_real():\n    assert compute() == 4\n"
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "a"))
+            os.makedirs(os.path.join(d, "b"))
+            write(d, "test_ok.py", honest)
+            write(os.path.join(d, "a"), "test_a.py", VACUOUS)
+            write(os.path.join(d, "b"), "test_b.py", VACUOUS)
+            code, out, _ = run(["check", d, "--exclude", "a/*", "--exclude", "b/*"])
+        self.assertEqual(code, 0)
+        self.assertIn("1 test(s)", out)

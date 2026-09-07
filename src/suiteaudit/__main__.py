@@ -2,9 +2,12 @@
 """SuiteAudit CLI.
 
   suiteaudit check [PATH ...] [--fail-on high|any|never] [--json]
+                   [--exclude GLOB ...]
       Find the tests in each PATH that cannot fail, and say why. Exits
       non-zero when the verdict is FAIL or NO DATA, so it can gate a pull
-      request. Several paths are merged into one verdict.
+      request. Several paths are merged into one verdict. --exclude leaves
+      out files whose path relative to PATH matches a glob (fixture
+      directories such as pytest's own example_scripts/).
 
   suiteaudit explain RULE
       What a rule means, why it is worth acting on, and the honest case for
@@ -37,17 +40,23 @@ from .detectors import SEVERITY_ORDER
 
 RULE_HELP = {
     "empty-test": (
-        "The test body is empty, or contains only a docstring.",
+        "The test body is empty, or contains only a docstring. Reported at "
+        "low severity instead of high when a decorator the tool does not know "
+        "wraps it, since that decorator may run the real test.",
         "It always passes, in every version of the code, forever. It is a "
         "placeholder that reads as coverage.",
-        "None. If it is a deliberate placeholder, mark it skipped so that it "
-        "reports as skipped rather than as passing.",
+        "A test that exists only so that a fixture, a setUpClass or a "
+        "decorator runs: say so with `# suiteaudit: ignore[empty-test]`. A "
+        "deliberate placeholder is better marked skipped, so that it reports "
+        "as skipped rather than as passing.",
     ),
     "tautology": (
         "The assertion's truth is fixed by the language before the code under "
         "test runs: `assert True`, `assertEqual(2, 2)`, `assert x is x`. "
         "`assert x == x` is not flagged: equality calls `__eq__`, which is "
-        "user code and can legitimately be false.",
+        "user code and can legitimately be false. `assert False` and "
+        "`assert 0` are not flagged either: they are fail-markers, and a test "
+        "that can reach one can fail.",
         "It cannot distinguish working code from broken code, which is the "
         "only thing a test is for.",
         "A deliberate smoke check that the test file imports and runs at all. "
@@ -78,7 +87,7 @@ RULE_HELP = {
 
 def cmd_check(args) -> int:
     from .audit import audit_paths, to_json
-    result = audit_paths(args.paths)
+    result = audit_paths(args.paths, exclude=args.exclude)
 
     if args.json:
         print(to_json(result))
@@ -206,6 +215,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "unless --fail-on never")
     c.add_argument("--json", action="store_true")
     c.add_argument("--limit", type=int, default=40)
+    c.add_argument("--exclude", action="append", default=[], metavar="GLOB",
+                   help="skip files whose path relative to PATH matches GLOB "
+                        "(repeatable; e.g. --exclude 'example_scripts/*')")
     c.set_defaults(func=cmd_check)
 
     e = sub.add_parser("explain", help="what a rule means and when to ignore it")

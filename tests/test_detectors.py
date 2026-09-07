@@ -82,12 +82,12 @@ class TestTautology(unittest.TestCase):
         self.assertIn("tautology", rules(src))
 
     def test_unittest_assert_equal_with_two_constants(self):
-        src = ("class T:\n    def test_x(self):\n"
+        src = ("class T(unittest.TestCase):\n    def test_x(self):\n"
                "        self.assertEqual(2, 2)\n")
         self.assertIn("tautology", rules(src))
 
     def test_unittest_assert_is_same_name(self):
-        src = ("class T:\n    def test_x(self):\n"
+        src = ("class T(unittest.TestCase):\n    def test_x(self):\n"
                "        got = compute()\n"
                "        self.assertIs(got, got)\n")
         self.assertIn("tautology", rules(src))
@@ -97,7 +97,7 @@ class TestTautology(unittest.TestCase):
         self.assertIn("tautology", rules(src))
 
     def test_unittest_assert_true_on_a_constant(self):
-        src = ("class T:\n    def test_x(self):\n"
+        src = ("class T(unittest.TestCase):\n    def test_x(self):\n"
                "        self.assertTrue(1)\n")
         self.assertIn("tautology", rules(src))
 
@@ -131,7 +131,7 @@ class TestTautology(unittest.TestCase):
     def test_expected_constant_against_a_real_value_is_fine(self):
         """The overwhelmingly common honest pattern: real value, constant
         expectation. Flagging this would make the tool useless."""
-        src = ("class T:\n    def test_x(self):\n"
+        src = ("class T(unittest.TestCase):\n    def test_x(self):\n"
                "        self.assertEqual(compute(), 42)\n")
         self.assertNotIn("tautology", rules(src))
 
@@ -144,7 +144,7 @@ class TestTautology(unittest.TestCase):
         self.assertNotIn("tautology", rules(src))
 
     def test_assert_equal_of_a_name_with_itself_is_user_code(self):
-        src = ("class T:\n    def test_x(self):\n"
+        src = ("class T(unittest.TestCase):\n    def test_x(self):\n"
                "        got = compute()\n"
                "        self.assertEqual(got, got)\n")
         self.assertNotIn("tautology", rules(src))
@@ -272,7 +272,7 @@ def test_x():
         """`self.run_pipeline()` is not an assertion helper, so production
         code may have run; the rule says nothing."""
         src = """
-class T:
+class T(unittest.TestCase):
     def test_x(self):
         sink = Mock()
         self.run_pipeline(sink)
@@ -311,7 +311,7 @@ def test_x():
 
     def test_unittest_assert_raises_counts(self):
         src = """
-class T:
+class T(unittest.TestCase):
     def test_x(self):
         with self.assertRaises(ValueError):
             compute(-1)
@@ -449,3 +449,210 @@ class TestSuppression(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestSecondMeasurementFalsePositives(unittest.TestCase):
+    """Shapes the 0.1.0 candidate flagged when it was run against eight more
+    popular suites on 7 Sep 2026 (django, pytest, pydantic, rich, httpx, black,
+    urllib3, flask). Every one is a real test that CAN fail, or is not a test."""
+
+    def test_assert_false_in_an_except_branch_is_a_fail_marker(self):
+        # Textualize/rich tests/test_inspect.py::test_inspect_swig_edge_case
+        src = '''
+def test_x():
+    try:
+        inspect(thing)
+    except Exception as e:
+        assert False, f"should not raise {e}"
+'''
+        self.assertEqual(rules(src), [])
+
+    def test_assert_zero_in_an_else_branch_is_a_fail_marker(self):
+        # pytest-dev/pytest testing/test_runner.py::test_exit_propagates
+        src = '''
+def test_x():
+    try:
+        run()
+    except SystemExit:
+        pass
+    else:
+        assert 0, "did not raise"
+'''
+        self.assertEqual(rules(src), [])
+
+    def test_a_fail_marker_inside_a_nested_function_is_not_a_tautology(self):
+        # pydantic tests/test_validate_call.py::test_do_not_call_repr_on_validate_call
+        src = '''
+def test_x():
+    class Thing:
+        def __repr__(self):
+            assert False
+    Thing(50)
+'''
+        self.assertNotIn("tautology", rules(src))
+
+    def test_a_constant_that_always_fails_is_not_a_tautology(self):
+        self.assertEqual(rules("def test_x():\n    assert 1 == 2\n"), [])
+        self.assertEqual(rules("def test_x():\n    assert None\n"), [])
+        self.assertEqual(rules("def test_x():\n    assert not True\n"), [])
+        self.assertEqual(rules("def test_x():\n    assert ()\n"), [])
+
+    def test_truthy_constants_are_still_tautologies(self):
+        self.assertEqual(rules("def test_x():\n    assert 1 == 1\n"), ["tautology"])
+        self.assertEqual(rules("def test_x():\n    assert not False\n"), ["tautology"])
+        self.assertEqual(rules("def test_x():\n    assert (1, 2)\n"), ["tautology"])
+        self.assertEqual(rules("def test_x():\n    assert 'x'\n"), ["tautology"])
+        self.assertEqual(rules("def test_x():\n    assert 1 < 2 <= 2\n"), ["tautology"])
+
+    def test_unittest_assert_true_on_false_always_fails(self):
+        src = "class T(unittest.TestCase):\n    def test_x(self):\n        self.assertTrue(False)\n"
+        self.assertEqual(rules(src), [])
+
+    def test_unittest_assert_false_on_false_is_a_tautology(self):
+        src = "class T(unittest.TestCase):\n    def test_x(self):\n        self.assertFalse(False)\n"
+        self.assertEqual(rules(src), ["tautology"])
+
+    def test_unittest_assert_equal_of_two_different_constants_always_fails(self):
+        src = "class T(unittest.TestCase):\n    def test_x(self):\n        self.assertEqual(2, 3)\n"
+        self.assertEqual(rules(src), [])
+
+    def test_unittest_assert_is_of_two_equal_singletons_is_a_tautology(self):
+        src = "class T(unittest.TestCase):\n    def test_x(self):\n        self.assertIs(None, None)\n"
+        self.assertEqual(rules(src), ["tautology"])
+
+    def test_a_constant_expression_too_big_to_evaluate_is_left_alone(self):
+        # Deciding this would mean computing it; the rule says nothing instead.
+        src = "def test_x():\n    assert 2 ** 10 ** 9 == 0\n"
+        self.assertEqual(rules(src), [])
+        src = "def test_x():\n    assert 'a' * 10 ** 9\n"
+        self.assertEqual(rules(src), [])
+
+    def test_an_http_patch_request_is_not_a_mock(self):
+        # encode/httpx tests/test_api.py::test_patch
+        src = '''
+def test_patch(server):
+    response = httpx.patch(server.url, content=b"x")
+    assert response.status_code == 200
+'''
+        self.assertEqual(rules(src), [])
+
+    def test_mock_dot_patch_is_still_a_mock_factory(self):
+        src = '''
+def test_x():
+    with mock.patch("app.client") as client:
+        client.send("hi")
+    client.send.assert_called_once_with("hi")
+'''
+        self.assertEqual(rules(src), ["mock-only"])
+
+    def test_pytest_mock_mocker_patch_is_a_mock_factory(self):
+        src = '''
+def test_x(mocker):
+    client = mocker.patch("app.client")
+    client.send("hi")
+    client.send.assert_called_once_with("hi")
+'''
+        self.assertEqual(rules(src), ["mock-only"])
+
+    def test_patch_imported_under_an_alias_is_a_mock_factory(self):
+        src = '''
+from unittest.mock import patch as p
+
+def test_x():
+    with p("app.client") as client:
+        client.send("hi")
+    client.send.assert_called_once_with("hi")
+'''
+        self.assertEqual(rules(src), ["mock-only"])
+
+    def test_unittest_mock_fully_qualified_is_a_mock_factory(self):
+        src = '''
+import unittest.mock
+
+def test_x():
+    client = unittest.mock.MagicMock()
+    client.send("hi")
+    client.send.assert_called_once_with("hi")
+'''
+        self.assertEqual(rules(src), ["mock-only"])
+
+    def test_a_module_imported_as_mock_is_a_mock_root(self):
+        src = '''
+from unittest import mock as m
+
+def test_x():
+    client = m.Mock()
+    client.send("hi")
+    client.send.assert_called_once_with("hi")
+'''
+        self.assertEqual(rules(src), ["mock-only"])
+
+    def test_methods_in_a_plain_class_are_not_tests(self):
+        # django tests/template_tests/filter_tests/test_dictsort.py::User
+        src = '''
+class User:
+    password = "abc"
+
+    def test_method(self):
+        """This is just a test method."""
+
+
+class FunctionTests(SimpleTestCase):
+    def test_property_resolver(self):
+        assert resolve(User()) == "abc"
+'''
+        self.assertEqual(count_tests(src), 1)
+        self.assertEqual(rules(src), [])
+
+    def test_methods_in_a_test_class_are_tests(self):
+        for header in ("class T(unittest.TestCase):", "class T(SimpleTestCase):",
+                       "class TestT:", "class ThingTests:", "class ThingTest(Base):",
+                       "class T(Mixin, django.test.TestCase):",
+                       "class T(IsolatedAsyncioTestCase):"):
+            src = header + "\n    def test_x(self):\n        pass\n"
+            self.assertEqual(count_tests(src), 1, header)
+            self.assertEqual(rules(src), ["empty-test"], header)
+
+    def test_an_empty_body_under_an_unknown_decorator_is_low(self):
+        # django tests/gis_tests/test_gis_tests_utils.py::test_not_mutated
+        src = '''
+@test_mutation(raises=False)
+def test_not_mutated(func):
+    pass
+'''
+        findings, _ = analyse_source(src, "t.py")
+        self.assertEqual([(f.rule, f.severity) for f in findings],
+                         [("empty-test", "low")])
+
+    def test_an_empty_body_under_an_inert_decorator_is_still_high(self):
+        for deco in ("@pytest.mark.parametrize('a', [1])", "@pytest.mark.skip",
+                     "@unittest.skipIf(True, 'x')", "@patch('app.x')",
+                     "@mock.patch.object(A, 'x')", "@override_settings(DEBUG=True)"):
+            src = deco + "\ndef test_x(*a):\n    pass\n"
+            findings, _ = analyse_source(src, "t.py")
+            self.assertEqual([(f.rule, f.severity) for f in findings],
+                             [("empty-test", "high")], deco)
+
+    def test_a_subclass_of_a_local_test_class_is_a_test_class(self):
+        # django tests/staticfiles_tests/test_liveserver.py::StaticLiveServerChecks
+        src = '''
+class LiveServerBase(LiveServerTestCase):
+    pass
+
+
+class StaticLiveServerChecks(LiveServerBase):
+    def test_test_test(self):
+        pass
+'''
+        self.assertEqual(count_tests(src), 1)
+        self.assertEqual(rules(src), ["empty-test"])
+
+    def test_a_base_class_cycle_does_not_recurse_forever(self):
+        src = "class A(B):\n    def test_x(self):\n        pass\n\nclass B(A):\n    pass\n"
+        self.assertEqual(count_tests(src), 0)
+
+    def test_a_plain_base_from_elsewhere_is_not_guessed_at(self):
+        # A miss, on purpose: the base's name says nothing and it is not in
+        # this file, so its methods are not reported.
+        src = "class Checks(Base):\n    def test_x(self):\n        pass\n"
+        self.assertEqual(count_tests(src), 0)

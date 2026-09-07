@@ -163,3 +163,55 @@ class TestSuppressionAtTheVerdict(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestExclude(unittest.TestCase):
+    """`exclude` drops files by a glob on their path relative to the root.
+    pytest's own suite carries deliberately empty example tests under
+    testing/example_scripts/ as fixtures; an adopter needs a way to leave such
+    a directory out without a comment in every file."""
+
+    def test_exclude_pattern_skips_matching_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "example_scripts", "sub"))
+            write(d, "test_ok.py", HONEST)
+            write(os.path.join(d, "example_scripts", "sub"), "test_fixture.py", VACUOUS)
+            full = audit(d)
+            trimmed = audit(d, exclude=["example_scripts/*"])
+        self.assertEqual(full.verdict()[0], "FAIL")
+        self.assertEqual(trimmed.verdict()[0], "PASS")
+        self.assertEqual((trimmed.n_files, trimmed.n_tests), (1, 1))
+
+    def test_exclude_matches_the_relative_path_with_forward_slashes(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "a", "b"))
+            write(os.path.join(d, "a", "b"), "test_deep.py", VACUOUS)
+            exact = audit(d, exclude=["a/b/test_deep.py"]).verdict()[0]
+            star = audit(d, exclude=["*/test_deep.py"]).verdict()[0]
+            other = audit(d, exclude=["other/*"]).verdict()[0]
+        self.assertEqual((exact, star, other), ("NO DATA", "NO DATA", "FAIL"))
+
+    def test_exclude_can_name_a_directory_or_a_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "fixtures"))
+            write(d, "test_ok.py", HONEST)
+            write(os.path.join(d, "fixtures"), "test_data.py", VACUOUS)
+            by_dir = audit(d, exclude=["fixtures"]).verdict()[0]
+            by_file = audit(d, exclude=["test_data.py"]).verdict()[0]
+        self.assertEqual((by_dir, by_file), ("PASS", "PASS"))
+
+    def test_excluding_everything_is_no_data_not_pass(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "test_ok.py", HONEST)
+            verdict, _ = audit(d, exclude=["*"]).verdict()
+        self.assertEqual(verdict, "NO DATA")
+
+    def test_exclude_applies_across_several_paths(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "one"))
+            os.makedirs(os.path.join(d, "two", "skip"))
+            write(os.path.join(d, "one"), "test_ok.py", HONEST)
+            write(os.path.join(d, "two", "skip"), "test_bad.py", VACUOUS)
+            verdict, _ = audit_paths([os.path.join(d, "one"), os.path.join(d, "two")],
+                                     exclude=["skip/*"]).verdict()
+        self.assertEqual(verdict, "PASS")

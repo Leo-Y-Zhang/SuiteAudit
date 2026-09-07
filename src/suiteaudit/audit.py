@@ -9,9 +9,10 @@ that is exactly how a broken checker goes unnoticed.
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
 from .detectors import Finding, analyse_file
@@ -94,22 +95,47 @@ def looks_like_tests(path: str) -> bool:
     return base.startswith("test_") or base.endswith("_test.py")
 
 
-def iter_test_files(root: str, skip: set[str] | None = None):
+def excluded(rel: str, exclude: Sequence[str]) -> bool:
+    """Does a glob in `exclude` match this file?
+
+    `rel` is the path relative to the audited root, with forward slashes on
+    every platform. A pattern is tried against the whole relative path, against
+    each directory prefix of it, and against the bare file name, so
+    `example_scripts/*`, `example_scripts` and `test_fixture.py` all work the
+    way a person writing them would expect. `*` matches across `/`.
+    """
+    if not exclude:
+        return False
+    rel = rel.replace(os.sep, "/")
+    parts = rel.split("/")
+    candidates = [rel, parts[-1]] + ["/".join(parts[:i]) for i in range(1, len(parts))]
+    return any(fnmatch.fnmatchcase(c, pat) for pat in exclude for c in candidates)
+
+
+def iter_test_files(root: str, skip: set[str] | None = None,
+                    exclude: Sequence[str] = ()):
     skip = skip or DEFAULT_SKIP
     if os.path.isfile(root):
-        yield root
+        if not excluded(os.path.basename(root), exclude):
+            yield root
         return
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in skip]
         for name in sorted(filenames):
-            if name.endswith(".py") and looks_like_tests(name):
-                yield os.path.join(dirpath, name)
+            if not (name.endswith(".py") and looks_like_tests(name)):
+                continue
+            path = os.path.join(dirpath, name)
+            if excluded(os.path.relpath(path, root), exclude):
+                continue
+            yield path
 
 
-def audit(root: str, skip: set[str] | None = None) -> AuditResult:
-    """Audit one file or directory tree."""
+def audit(root: str, skip: set[str] | None = None,
+          exclude: Sequence[str] = ()) -> AuditResult:
+    """Audit one file or directory tree. `exclude` holds globs, matched by
+    :func:`excluded` against each file's path relative to `root`."""
     result = AuditResult(roots=[root])
-    for path in iter_test_files(root, skip):
+    for path in iter_test_files(root, skip, exclude):
         shown = os.path.relpath(path, root) if os.path.isdir(root) else path
         try:
             with open(path, encoding="utf-8") as fh:
@@ -141,11 +167,12 @@ def audit(root: str, skip: set[str] | None = None) -> AuditResult:
     return result
 
 
-def audit_paths(paths: Iterable[str], skip: set[str] | None = None) -> AuditResult:
+def audit_paths(paths: Iterable[str], skip: set[str] | None = None,
+                exclude: Sequence[str] = ()) -> AuditResult:
     """Audit several files or trees and merge the results into one verdict."""
     total = AuditResult()
     for path in paths:
-        total.merge(audit(path, skip))
+        total.merge(audit(path, skip, exclude))
     return total
 
 

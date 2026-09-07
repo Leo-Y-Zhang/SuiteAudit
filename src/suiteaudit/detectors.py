@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import io
+import operator
 import re
 import tokenize
 from dataclasses import dataclass, field
@@ -31,6 +32,30 @@ MOCK_FACTORIES = frozenset({
     "Mock", "MagicMock", "AsyncMock", "NonCallableMock", "NonCallableMagicMock",
     "create_autospec", "patch", "mock_open", "sentinel", "PropertyMock",
     "stub", "fake", "Spy", "Stub", "Fake",
+})
+
+# Attributes of `patch` that still construct a double: `patch.object(...)`,
+# `patch.dict(...)`, `patch.multiple(...)`.
+PATCH_VARIANTS = frozenset({"object", "dict", "multiple"})
+
+# Objects whose attributes are the mock library's own: `mock.patch`,
+# `unittest.mock.MagicMock`, and pytest-mock's `mocker.patch`. A factory name
+# hanging off anything else is NOT a mock -- `httpx.patch(url)` and
+# `requests.patch(url)` are HTTP requests, and the second measurement of the
+# 0.1.0 candidate flagged one of them as a mock. Extended per file by the
+# imports it actually makes (see `mock_context`).
+DEFAULT_MOCK_ROOTS = frozenset({"mock", "mocker", "unittest"})
+MOCK_MODULES = frozenset({"mock", "unittest.mock"})
+
+# Decorators that cannot turn an empty body into a test that fails: markers,
+# skips, patches and settings overrides. A decorator NOT in this set may run
+# the real test around the empty body -- Django's `@test_mutation(raises=False)`
+# does exactly that -- so an empty body under one is reported at low severity,
+# because the line alone cannot decide it.
+INERT_DECORATORS = frozenset({
+    "mark", "skip", "skipIf", "skipUnless", "expectedFailure", "parametrize",
+    "usefixtures", "patch", "override_settings", "modify_settings",
+    "staticmethod", "classmethod", "filterwarnings", "ignore_warnings",
 })
 
 # Assertion helpers that carry a real expectation about behaviour.
@@ -72,6 +97,14 @@ SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 # the text of a string literal.
 SUPPRESS_RE = re.compile(r"#\s*suiteaudit:\s*ignore(?:\[([^\]]*)\])?")
 
+# Limits on what a constant expression may contain before the tool will
+# evaluate it to learn whether it is true. `assert 2 ** 10 ** 9 == 0` is a
+# constant expression; computing it is not the tool's job.
+_BIG_NUMBER = 10 ** 9
+_LONG_LITERAL = 10_000
+_UNBOUNDED_OPS = (ast.Pow, ast.LShift, ast.Mult, ast.MatMult)
+_SINGLETONS = (type(None), bool, type(Ellipsis))
+
 
 @dataclass
 class Finding:
@@ -92,12 +125,28 @@ class Finding:
         }
 
 
+@dataclass(frozen=True)
+class MockContext:
+    """What this file calls the mock library.
+
+    `roots` are names whose attributes are mock factories (`mock.patch`,
+    `mocker.patch`); `factories` are bare names bound to a factory by an
+    import (`from unittest.mock import patch as p`).
+    """
+    roots: frozenset[str] = DEFAULT_MOCK_ROOTS
+    factories: frozenset[str] = frozenset()
+
+
+DEFAULT_MOCK_CONTEXT = MockContext()
+
+
 @dataclass
 class TestFunction:
     name: str
     node: ast.FunctionDef | ast.AsyncFunctionDef
     file: str
     class_name: str | None = None
+    mocks: MockContext = DEFAULT_MOCK_CONTEXT
 
     @property
     def qualified(self) -> str:
@@ -125,15 +174,89 @@ def _is_test(node) -> bool:
             and node.name.startswith("test"))
 
 
+def _dotted(node: ast.AST) -> list[str]:
+    """The names of a dotted expression, calls and subscripts stripped:
+    `unittest.mock.patch.object(...)` -> ['unittest', 'mock', 'patch', 'object'].
+    Empty when the expression is not rooted in a plain name."""
+    parts: list[str] = []
+    while True:
+        if isinstance(node, ast.Call):
+            node = node.func
+        elif isinstance(node, ast.Subscript):
+            node = node.value
+        elif isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        elif isinstance(node, ast.Name):
+            parts.append(node.id)
+            break
+        else:
+            return []
+    parts.reverse()
+    return parts
+
+
+def _is_test_class(node: ast.ClassDef, module_classes: dict[str, ast.ClassDef],
+                   seen: frozenset[str] = frozenset()) -> bool:
+    """Would a test runner collect methods from this class?
+
+    pytest collects classes named `Test*`; unittest collects subclasses of
+    `TestCase`, whatever they are called. A plain helper class that happens to
+    have a `test_method` -- Django keeps one as fixture data -- is collected by
+    neither, so its methods are not tests and must not be reported as such.
+
+    A base is taken to be a test class when its name carries `Test`
+    (`unittest.TestCase`, `SimpleTestCase`, `IsolatedAsyncioTestCase`) or when
+    it is a class in the same file that is itself a test class
+    (`class Base(LiveServerTestCase)` then `class Checks(Base)`). A base
+    imported from elsewhere under a name without `Test` in it is not
+    recognised, and its methods are missed rather than guessed at.
+    """
+    if node.name.startswith("Test") or node.name.endswith(("Test", "Tests", "TestCase")):
+        return True
+    for base in node.bases:
+        names = _dotted(base)
+        if "Test" in ".".join(names):
+            return True
+        if len(names) == 1 and names[0] in module_classes and names[0] not in seen:
+            if _is_test_class(module_classes[names[0]], module_classes,
+                              seen | {node.name}):
+                return True
+    return False
+
+
+def mock_context(tree: ast.AST) -> MockContext:
+    """Read the file's imports to learn what it calls the mock library."""
+    roots = set(DEFAULT_MOCK_ROOTS)
+    factories: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in MOCK_MODULES:
+                    # `import mock`, `import unittest.mock`, `import unittest.mock as m`
+                    roots.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module in MOCK_MODULES:
+                # `from unittest.mock import patch as p`
+                factories.update(alias.asname or alias.name for alias in node.names)
+            elif node.module == "unittest":
+                # `from unittest import mock as m`
+                roots.update(alias.asname or alias.name
+                             for alias in node.names if alias.name == "mock")
+    return MockContext(frozenset(roots), frozenset(factories))
+
+
 def collect_tests(tree: ast.AST, path: str) -> list[TestFunction]:
+    ctx = mock_context(tree)
+    module_classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
     out: list[TestFunction] = []
     for node in tree.body:
         if _is_test(node):
-            out.append(TestFunction(node.name, node, path))
-        elif isinstance(node, ast.ClassDef):
+            out.append(TestFunction(node.name, node, path, mocks=ctx))
+        elif isinstance(node, ast.ClassDef) and _is_test_class(node, module_classes):
             for sub in node.body:
                 if _is_test(sub):
-                    out.append(TestFunction(sub.name, sub, path, node.name))
+                    out.append(TestFunction(sub.name, sub, path, node.name, mocks=ctx))
     return out
 
 
@@ -157,6 +280,26 @@ def _root_name(node: ast.AST) -> str | None:
         node = node.value if isinstance(node, (ast.Attribute, ast.Subscript)) \
             else node.func
     return node.id if isinstance(node, ast.Name) else None
+
+
+def _is_mock_factory_call(func: ast.AST, ctx: MockContext) -> bool:
+    """Does this call construct a test double?
+
+    `MagicMock()`, `patch(...)`, `patch.object(...)` and any name imported from
+    the mock library count on their own. A factory name reached through an
+    attribute counts only when the object it hangs off is the mock library
+    (`mock.patch`, `unittest.mock.MagicMock`, `mocker.patch`); `httpx.patch(url)`
+    is an HTTP request and is not a mock.
+    """
+    names = [n for n in _dotted(func) if n not in PATCH_VARIANTS]
+    if not names:
+        return False
+    last = names[-1]
+    if last not in MOCK_FACTORIES and last not in ctx.factories:
+        return False
+    if len(names) == 1:
+        return True
+    return names[0] in ctx.roots
 
 
 def _is_assertion_name(name: str | None) -> bool:
@@ -194,7 +337,7 @@ def _assertion_nodes(fn) -> list[ast.AST]:
     return found
 
 
-def _mock_variables(fn) -> set[str]:
+def _mock_variables(fn, ctx: MockContext) -> set[str]:
     """Names bound to a test double inside this test.
 
     Only direct construction counts. Something returned from a fixture or an
@@ -215,8 +358,7 @@ def _mock_variables(fn) -> set[str]:
             continue
         if not isinstance(value, ast.Call):
             continue
-        factory = _attr_name(value.func)
-        if factory not in MOCK_FACTORIES:
+        if not _is_mock_factory_call(value.func, ctx):
             continue
         for t in targets:
             if isinstance(t, ast.Name):
@@ -249,6 +391,106 @@ def _is_constant_expr(node: ast.AST) -> bool:
     return False
 
 
+def _constant_value(node: ast.AST) -> tuple[bool, object]:
+    """(True, value) for a constant expression that is cheap to evaluate;
+    (False, None) for anything else.
+
+    The value decides whether an assertion is a tautology (`assert 1 == 1`) or
+    a fail-marker (`assert False, "unreachable"`, `assert 0`). The two look the
+    same to a syntax check and mean the opposite: a fail-marker is how a test
+    says "reaching this line IS the failure", so a test that carries one can
+    fail and is not vacuous. The second measurement of the 0.1.0 candidate
+    flagged nine of them across four popular suites.
+
+    Only Python's own constant folding is trusted here, and only on inputs
+    small enough that folding is free. An expression that would take real work
+    to evaluate is left undecided, and an undecided assertion is not reported.
+    """
+    if not _is_constant_expr(node):
+        return False, None
+    for n in ast.walk(node):
+        if isinstance(n, ast.BinOp) and isinstance(n.op, _UNBOUNDED_OPS):
+            return False, None
+        if isinstance(n, ast.Constant):
+            v = n.value
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) > _BIG_NUMBER:
+                return False, None
+            if isinstance(v, (str, bytes)) and len(v) > _LONG_LITERAL:
+                return False, None
+    try:
+        return True, _fold(node)
+    except Exception:  # noqa: BLE001 - `'a' < 1`, `1 / 0`, `{[]: 1}`: undecided, not reported
+        return False, None
+
+
+# The folding is written out rather than handed to eval(): the input is a
+# syntax tree from a file the tool was pointed at, and a tool that evaluates
+# strangers' files is a tool nobody should run in CI. Only the node types
+# `_is_constant_expr` admits are handled; anything else raises and the
+# assertion stays undecided.
+_BIN_OPS = {
+    ast.Add: operator.add, ast.Sub: operator.sub, ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod, ast.BitOr: operator.or_,
+    ast.BitAnd: operator.and_, ast.BitXor: operator.xor, ast.RShift: operator.rshift,
+}
+_UNARY_OPS = {
+    ast.Not: operator.not_, ast.USub: operator.neg, ast.UAdd: operator.pos,
+    ast.Invert: operator.invert,
+}
+_COMPARE_OPS = {
+    ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Lt: operator.lt,
+    ast.LtE: operator.le, ast.Gt: operator.gt, ast.GtE: operator.ge,
+    ast.In: lambda a, b: a in b, ast.NotIn: lambda a, b: a not in b,
+}
+
+
+def _fold(node: ast.AST) -> object:
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Tuple):
+        return tuple(_fold(e) for e in node.elts)
+    if isinstance(node, ast.List):
+        return [_fold(e) for e in node.elts]
+    if isinstance(node, ast.Set):
+        return {_fold(e) for e in node.elts}
+    if isinstance(node, ast.Dict):
+        if any(k is None for k in node.keys):
+            raise ValueError("** in a dict display")
+        return {_fold(k): _fold(v) for k, v in zip(node.keys, node.values, strict=True)}
+    if isinstance(node, ast.BinOp):
+        return _BIN_OPS[type(node.op)](_fold(node.left), _fold(node.right))
+    if isinstance(node, ast.UnaryOp):
+        return _UNARY_OPS[type(node.op)](_fold(node.operand))
+    if isinstance(node, ast.Compare):
+        left = _fold(node.left)
+        for op, comparator in zip(node.ops, node.comparators, strict=True):
+            right = _fold(comparator)
+            if isinstance(op, (ast.Is, ast.IsNot)):
+                # `1 is 1` is an implementation detail of CPython's constant
+                # table; only the language's singletons are decidable here.
+                if not (isinstance(left, _SINGLETONS) and isinstance(right, _SINGLETONS)):
+                    raise ValueError("identity of non-singleton constants")
+                result = (left is right) if isinstance(op, ast.Is) else (left is not right)
+            else:
+                result = _COMPARE_OPS[type(op)](left, right)
+            if not result:
+                return False
+            left = right
+        return True
+    raise ValueError(f"not a constant expression: {type(node).__name__}")
+
+
+def _truth(node: ast.AST) -> bool | None:
+    """True / False for a decidable constant expression, None otherwise."""
+    ok, value = _constant_value(node)
+    if not ok:
+        return None
+    try:
+        return bool(value)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _same_name(a: ast.AST, b: ast.AST) -> bool:
     """Both sides are the same plain variable.
 
@@ -260,7 +502,35 @@ def _same_name(a: ast.AST, b: ast.AST) -> bool:
     return isinstance(a, ast.Name) and isinstance(b, ast.Name) and a.id == b.id
 
 
-def _calls_outside_mocks(fn, mocks: set[str], assertions: list[ast.AST]) -> bool:
+def _constants_agree(helper: str, a: ast.AST, b: ast.AST) -> bool:
+    """Would `helper(a, b)` pass for these two constant arguments?
+
+    False when it would fail (`assertEqual(2, 3)` always fails, so the test can
+    fail and is not a tautology) and when the tool cannot tell. `assertIs` on
+    constants is a tautology only for values the language makes unique --
+    `None`, `True`, `False`, `...` -- and for equal immutable literals, which
+    every CPython compiles to one constant per code object.
+    """
+    ok_a, va = _constant_value(a)
+    ok_b, vb = _constant_value(b)
+    if not (ok_a and ok_b):
+        return False
+    try:
+        if helper == "assertIs":
+            if type(va) is not type(vb):
+                return False
+            return (isinstance(va, _SINGLETONS + (int, float, str, bytes))
+                    and va == vb)
+        if helper == "assertAlmostEqual":
+            return (isinstance(va, (int, float)) and isinstance(vb, (int, float))
+                    and va == vb)
+        return bool(va == vb)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _calls_outside_mocks(fn, mocks: set[str], assertions: list[ast.AST],
+                         ctx: MockContext) -> bool:
     """Does the test body call anything that is not a mock, a mock factory, an
     assertion helper or a plain builtin?
 
@@ -275,7 +545,7 @@ def _calls_outside_mocks(fn, mocks: set[str], assertions: list[ast.AST]) -> bool
                 continue
             name = _attr_name(n.func)
             root = _root_name(n.func)
-            if name in MOCK_FACTORIES or root in MOCK_FACTORIES:
+            if _is_mock_factory_call(n.func, ctx):
                 continue
             if root in mocks:
                 continue
@@ -320,6 +590,11 @@ def _is_suppressed(finding: Finding, test: TestFunction,
     return False
 
 
+def _is_inert_decorator(node: ast.AST) -> bool:
+    names = _dotted(node)
+    return bool(names) and any(n in INERT_DECORATORS for n in names)
+
+
 # ---------------------------------------------------------------- detectors
 
 def detect_no_assertion(test: TestFunction) -> list[Finding]:
@@ -346,7 +621,13 @@ def detect_no_assertion(test: TestFunction) -> list[Finding]:
 
 
 def detect_empty_test(test: TestFunction) -> list[Finding]:
-    """A test whose body does nothing at all. It cannot fail, ever."""
+    """A test whose body does nothing at all. It cannot fail, ever.
+
+    Unless a decorator the tool does not know is wrapped around it: a project
+    can write `@checks_that(...)` and put the whole test in the decorator, and
+    Django does. An empty body under such a decorator is reported at low
+    severity, since the line alone cannot say whether the test runs.
+    """
     fn = test.node
     meaningful = [s for s in fn.body
                   if not isinstance(s, ast.Pass)
@@ -354,11 +635,26 @@ def detect_empty_test(test: TestFunction) -> list[Finding]:
                            and isinstance(s.value, ast.Constant))]
     if meaningful:
         return []
+    unknown = [d for d in fn.decorator_list if not _is_inert_decorator(d)]
+    if unknown:
+        return [Finding(
+            rule="empty-test", severity="low", test=test.qualified,
+            file=test.file, line=fn.lineno,
+            detail="body is empty, but a decorator the tool does not know may "
+                   "run the test around it",
+            evidence=f"decorated by @{ast.unparse(unknown[0])[:70]}")]
     return [Finding(
         rule="empty-test", severity="high", test=test.qualified,
         file=test.file, line=fn.lineno,
         detail="body is empty or only a docstring; this test always passes",
         evidence="no executable statements")]
+
+
+def _tautology(test: TestFunction, node: ast.AST, detail: str,
+               evidence: ast.AST) -> Finding:
+    return Finding(rule="tautology", severity="high", test=test.qualified,
+                   file=test.file, line=node.lineno, detail=detail,
+                   evidence=ast.unparse(evidence)[:80])
 
 
 def detect_tautology(test: TestFunction) -> list[Finding]:
@@ -373,6 +669,12 @@ def detect_tautology(test: TestFunction) -> list[Finding]:
     failed its gate; the rule now stops at what the language itself
     guarantees, which is identity.
 
+    A constant assertion that is FALSE is not here either. `assert False,
+    "did not raise"` in an `else:` branch and `assert 0` behind an exhausted
+    `if/elif` are fail-markers: the test fails if the line is reached, so the
+    test can fail. The second measurement flagged nine of them; the rule now
+    evaluates the constant and reports only the true ones.
+
     Severity is high only when EVERY assertion in the test is a tautology,
     because only then can the test not fail. A dead `assert True` inside a
     test with real assertions is reported at low severity: worth removing,
@@ -384,45 +686,37 @@ def detect_tautology(test: TestFunction) -> list[Finding]:
         if isinstance(node, ast.Assert):
             t = node.test
             if _is_constant_expr(t):
-                out.append(Finding(
-                    rule="tautology", severity="high", test=test.qualified,
-                    file=test.file, line=node.lineno,
-                    detail="assertion is a constant expression; it cannot fail",
-                    evidence=ast.unparse(t)[:80]))
+                if _truth(t) is True:
+                    out.append(_tautology(
+                        test, node, "assertion is a constant expression that "
+                        "is true; it cannot fail", t))
             elif (isinstance(t, ast.Compare) and len(t.comparators) == 1
                   and isinstance(t.ops[0], ast.Is)
                   and _same_name(t.left, t.comparators[0])):
-                out.append(Finding(
-                    rule="tautology", severity="high", test=test.qualified,
-                    file=test.file, line=node.lineno,
-                    detail="a name is compared to itself with `is`; identity "
-                           "is reflexive by definition",
-                    evidence=ast.unparse(t)[:80]))
+                out.append(_tautology(
+                    test, node, "a name is compared to itself with `is`; "
+                    "identity is reflexive by definition", t))
         elif isinstance(node, ast.Call):
             name = _attr_name(node.func)
             if name in {"assertEqual", "assertIs", "assertAlmostEqual"} \
                     and len(node.args) >= 2:
                 a, b = node.args[0], node.args[1]
                 if _is_constant_expr(a) and _is_constant_expr(b):
-                    out.append(Finding(
-                        rule="tautology", severity="high", test=test.qualified,
-                        file=test.file, line=node.lineno,
-                        detail="both arguments are constants; it cannot fail",
-                        evidence=ast.unparse(node)[:80]))
+                    if _constants_agree(name, a, b):
+                        out.append(_tautology(
+                            test, node, "both arguments are equal constants; "
+                            "it cannot fail", node))
                 elif name == "assertIs" and _same_name(a, b):
-                    out.append(Finding(
-                        rule="tautology", severity="high", test=test.qualified,
-                        file=test.file, line=node.lineno,
-                        detail="a name is compared to itself with assertIs; "
-                               "identity is reflexive by definition",
-                        evidence=ast.unparse(node)[:80]))
+                    out.append(_tautology(
+                        test, node, "a name is compared to itself with "
+                        "assertIs; identity is reflexive by definition", node))
             elif name in {"assertTrue", "assertFalse"} and node.args \
                     and _is_constant_expr(node.args[0]):
-                out.append(Finding(
-                    rule="tautology", severity="high", test=test.qualified,
-                    file=test.file, line=node.lineno,
-                    detail="argument is a constant; the assertion cannot fail",
-                    evidence=ast.unparse(node)[:80]))
+                truth = _truth(node.args[0])
+                if truth is not None and truth == (name == "assertTrue"):
+                    out.append(_tautology(
+                        test, node, "argument is a constant that satisfies "
+                        "the assertion; it cannot fail", node))
     if out and len(_assertion_nodes(fn)) > len(out):
         # The test also carries assertions that CAN fail, so the test itself
         # is not vacuous; the tautology is dead weight inside a real test.
@@ -454,10 +748,10 @@ def detect_mock_only(test: TestFunction) -> list[Finding]:
     assertions = _assertion_nodes(fn)
     if not assertions:
         return []
-    mocks = _mock_variables(fn)
+    mocks = _mock_variables(fn, test.mocks)
     if not mocks:
         return []
-    if _calls_outside_mocks(fn, mocks, assertions):
+    if _calls_outside_mocks(fn, mocks, assertions, test.mocks):
         return []
 
     def touches_only_mocks(node: ast.AST) -> bool:
