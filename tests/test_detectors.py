@@ -656,3 +656,71 @@ class StaticLiveServerChecks(LiveServerBase):
         # this file, so its methods are not reported.
         src = "class Checks(Base):\n    def test_x(self):\n        pass\n"
         self.assertEqual(count_tests(src), 0)
+
+
+class TestMutationCoverageGaps(unittest.TestCase):
+    """Six gaps a mutation-testing pass found in this file's own suite
+    (audit/mutants/SuiteAudit.md, section 3): each mutation below survived the
+    previous tests because nothing pinned the exact behaviour it changes."""
+
+    def test_mock_only_finding_is_high_severity(self):
+        # detectors.py ~784: `severity="high"` on the mock-only Finding can
+        # silently become `None` -- `rules()` only checks that "mock-only" is
+        # among the rule names, never the severity that decides FAIL/WARN.
+        src = """
+def test_x():
+    client = MagicMock()
+    client.send("hi")
+    client.send.assert_called_once_with("hi")
+"""
+        findings, _ = analyse_source(src, "t.py")
+        finding = next(f for f in findings if f.rule == "mock-only")
+        self.assertEqual(finding.severity, "high")
+
+    def test_self_in_a_mock_only_assertion_does_not_defeat_the_rule(self):
+        # detectors.py ~761: `names.discard("self")` -- the assertion's own
+        # receiver (`self` in unittest) must not read as "something besides
+        # the mock was inspected", or a plain unittest-style mock-only test
+        # that happens to compare against `self` would be missed.
+        src = """
+class T(unittest.TestCase):
+    def test_x(self):
+        mock = Mock()
+        mock.owner = self
+        assert mock.owner is self
+"""
+        self.assertIn("mock-only", rules(src))
+
+    def test_one_undecidable_side_is_not_a_tautology(self):
+        # detectors.py ~516: `if not (ok_a and ok_b)` must bail out whenever
+        # EITHER side of assertEqual/assertIs/assertAlmostEqual is undecided.
+        # `2 * 3` is syntactically a constant expression (so it reaches
+        # `_constants_agree` at all) but `*` is one of the `_UNBOUNDED_OPS`
+        # `_constant_value` deliberately refuses to fold, so it is undecided
+        # in practice; pairing it with a real constant must never read as
+        # "both sides are equal constants".
+        src = "def test_x():\n    assertEqual(2 * 3, None)\n"
+        self.assertNotIn("tautology", rules(src))
+
+    def test_assert_is_of_two_equal_non_none_constants_is_a_tautology(self):
+        # detectors.py ~520: the assertIs type-match check must compare the
+        # two operands' types to EACH OTHER. The only existing coverage
+        # (`assertIs(None, None)`) has both sides already `NoneType`, so a
+        # check that quietly compares one side to `NoneType` instead of to
+        # the other side's type would pass it unnoticed.
+        src = "class T(unittest.TestCase):\n    def test_x(self):\n        self.assertIs(1, 1)\n"
+        self.assertEqual(rules(src), ["tautology"])
+
+    def test_dict_literal_equality_is_a_tautology(self):
+        # detectors.py ~381: `_is_constant_expr`'s ast.Dict clause. No
+        # existing test ever hands a dict literal to a tautology check, so
+        # this branch is never even reached by the suite.
+        src = "def test_x():\n    assertEqual({'a': 1}, {'a': 1})\n"
+        self.assertIn("tautology", rules(src))
+
+    def test_list_literal_equality_is_a_tautology(self):
+        # detectors.py ~453: `_fold`'s list clause must fold each element of
+        # the actual list. Tuple folding is exercised elsewhere
+        # (`assert (1, 2)`), but no test ever folds a list literal.
+        src = "def test_x():\n    assertEqual([1, 2], [1, 2])\n"
+        self.assertIn("tautology", rules(src))
