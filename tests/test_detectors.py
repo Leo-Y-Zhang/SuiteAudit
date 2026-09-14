@@ -724,3 +724,333 @@ class T(unittest.TestCase):
         # (`assert (1, 2)`), but no test ever folds a list literal.
         src = "def test_x():\n    assertEqual([1, 2], [1, 2])\n"
         self.assertIn("tautology", rules(src))
+
+
+class TestMockContextPlainImport(unittest.TestCase):
+    """`mock_context`'s `ast.Import` branch (detectors.py ~228-237): every
+    existing mock-root fixture uses `from unittest import mock as m`
+    (`ImportFrom`); a bare `import mock`, an aliased `import mock as m`, and
+    an unrelated import are never exercised at all
+    (audit/mutants/SuiteAudit.md, section 4, item 1)."""
+
+    def test_bare_import_mock_is_recognized_and_does_not_crash(self):
+        # The single most common way to import the mock library. A survivor
+        # mutation turns `.split(".")[0]` into `.split(".")[1]`, which is an
+        # outright IndexError on this exact input (`"mock".split(".")` has
+        # only one element) -- mock_context runs on every file, so that
+        # mutation would crash the whole audit on any file that merely
+        # contains this import, whether or not Mock() is even used.
+        src = """
+import mock
+
+def test_x():
+    client = mock.Mock()
+    client.send("hi")
+    client.send.assert_called_once_with("hi")
+"""
+        self.assertEqual(rules(src), ["mock-only"])
+
+    def test_import_mock_as_an_alias_is_a_mock_root(self):
+        # `import mock as m` binds a root name ("m") that is NOT already in
+        # DEFAULT_MOCK_ROOTS, so this is the one case that actually proves
+        # the import is read at all (unlike bare `import mock`, where "mock"
+        # is already a default root regardless of this code running).
+        src = """
+import mock as m
+
+def test_x():
+    client = m.Mock()
+    client.send("hi")
+    client.send.assert_called_once_with("hi")
+"""
+        self.assertEqual(rules(src), ["mock-only"])
+
+    def test_an_unrelated_import_is_not_mistaken_for_a_mock_root(self):
+        # The false positive the docstring exists to prevent: an ordinary,
+        # unrelated import must never add its own name to `roots`. Pairs
+        # with `test_an_http_patch_request_is_not_a_mock`, but with the
+        # import actually present so `mock_context`'s `in MOCK_MODULES`
+        # check is the thing standing between this test and a false "mock".
+        src = """
+import requests
+
+def test_patch(server):
+    response = requests.patch(server.url, content=b"x")
+    assert response.status_code == 200
+"""
+        self.assertEqual(rules(src), [])
+
+
+class TestFoldExceptionFallbackIsConservative(unittest.TestCase):
+    """detectors.py ~421-423: when `_fold` raises for a syntactically
+    constant-looking expression (division by zero, per the code's own
+    comment), `_constant_value` must fall back to "undecided", never to
+    "decidably equal" -- otherwise an assertion that cannot even RUN gets
+    reported as an unfixable tautology (audit/mutants/SuiteAudit.md, section
+    4, item 2 -- "the most actively misleading single verdict found")."""
+
+    def test_a_division_by_zero_is_not_reported_as_a_tautology(self):
+        src = ("class T(unittest.TestCase):\n    def test_x(self):\n"
+               "        self.assertEqual(1 / 0, 1 / 0)\n")
+        self.assertEqual(rules(src), [])
+
+
+class TestConstantsAgreeDeadPaths(unittest.TestCase):
+    """`_constants_agree`'s `assertIs` type-mismatch branch and its
+    `assertAlmostEqual` branch are entirely unexercised by any existing test
+    (coverage confirms detectors.py:521 and :525 are never hit)
+    (audit/mutants/SuiteAudit.md, section 4, item 5)."""
+
+    def test_assert_is_of_two_different_types_is_not_a_tautology(self):
+        # `1 is 1.0` is False at runtime (different objects, different
+        # types); the type-mismatch guard must say so.
+        src = "class T(unittest.TestCase):\n    def test_x(self):\n        self.assertIs(1, 1.0)\n"
+        self.assertEqual(rules(src), [])
+
+    def test_assert_is_of_two_unequal_same_type_constants_is_not_a_tautology(self):
+        # Same type on both sides, but the values differ: `assertIs(1, 2)`
+        # is a real, working assertion (it fails), not an unfixable one.
+        src = "class T(unittest.TestCase):\n    def test_x(self):\n        self.assertIs(1, 2)\n"
+        self.assertEqual(rules(src), [])
+
+    def test_assert_almost_equal_of_equal_floats_is_a_tautology(self):
+        src = ("class T(unittest.TestCase):\n    def test_x(self):\n"
+               "        self.assertAlmostEqual(2.0, 2.0)\n")
+        self.assertEqual(rules(src), ["tautology"])
+
+    def test_assert_almost_equal_of_different_floats_is_not_a_tautology(self):
+        src = ("class T(unittest.TestCase):\n    def test_x(self):\n"
+               "        self.assertAlmostEqual(2.0, 3.0)\n")
+        self.assertEqual(rules(src), [])
+
+    def test_assert_almost_equal_requires_numeric_operands(self):
+        # `assertAlmostEqual` is meaningless for non-numeric types; two equal
+        # constants of a type it does not accept must not be reported as a
+        # tautology through the generic equality fallback that runs for
+        # every OTHER helper. (Two equal bytes objects would satisfy a bare
+        # `va == vb`, so this only passes when the numeric-type check is the
+        # thing actually deciding it, not a name-string that merely looks
+        # like "assertAlmostEqual".)
+        src = ("class T(unittest.TestCase):\n    def test_x(self):\n"
+               '        self.assertAlmostEqual(b"x", b"x")\n')
+        self.assertEqual(rules(src), [])
+
+
+class TestMockOnlyOrdinaryAttributeAssertion(unittest.TestCase):
+    """detectors.py ~773 (`args_only_mocks`): every existing mock-only
+    fixture asserts with `x.method.assert_called...()`. The equally ordinary
+    `self.assertTrue(m.called)` shape -- a plain unittest assertion whose
+    sole argument is an attribute read straight off the mock -- is never
+    exercised (audit/mutants/SuiteAudit.md, section 4, item 6)."""
+
+    def test_assert_true_on_a_mocks_called_attribute_is_mock_only(self):
+        src = """
+class T(unittest.TestCase):
+    def test_x(self):
+        m = Mock()
+        m.thing()
+        self.assertTrue(m.called)
+"""
+        self.assertEqual(rules(src), ["mock-only"])
+
+
+class TestFoldSingletonIdentityGuard(unittest.TestCase):
+    """`_fold`'s `is`/`is not` handling (detectors.py ~467-476) only
+    guarantees identity for the language's own singletons (`None`, `True`,
+    `False`, `...`); CPython does not guarantee it for other constants
+    (large ints, strings), and the guard that refuses to decide those is
+    never exercised in either direction (audit/mutants/SuiteAudit.md,
+    section 4, item 7)."""
+
+    def test_identity_of_two_equal_int_literals_is_left_undecided(self):
+        src = "def test_x():\n    assert 1000000 is 1000000\n"
+        self.assertEqual(rules(src), [])
+
+    def test_identity_of_two_equal_string_literals_is_left_undecided(self):
+        src = 'def test_x():\n    assert "abc" is "abc"\n'
+        self.assertEqual(rules(src), [])
+
+    def test_identity_of_the_none_singleton_is_still_a_tautology(self):
+        # The guard must not swallow the one case it exists to allow.
+        src = "def test_x():\n    assert None is None\n"
+        self.assertEqual(rules(src), ["tautology"])
+
+    def test_none_is_not_none_is_not_a_tautology(self):
+        # `is not` must be evaluated as `is not`, never folded down to the
+        # same check as `is`: `None is not None` is always False (a fail
+        # marker, not a tautology) -- every other test above only exercises
+        # the `is` half of this branch.
+        src = "def test_x():\n    assert None is not None\n"
+        self.assertEqual(rules(src), [])
+
+
+class TestCollectTestsClassIdentity(unittest.TestCase):
+    """`collect_tests`'s class-based branch (detectors.py ~255) builds each
+    `TestFunction`'s identity and its `mocks` context positionally; nothing
+    checks that two different test classes keep distinct identities, or that
+    a class-based test method actually receives the file's real mock context
+    rather than silently falling back to the default one
+    (audit/mutants/SuiteAudit.md, section 4, item 8)."""
+
+    def test_methods_in_different_classes_keep_distinct_qualified_names(self):
+        src = """
+class TestA(unittest.TestCase):
+    def test_x(self):
+        assert True
+
+class TestB(unittest.TestCase):
+    def test_x(self):
+        assert True
+"""
+        findings, n = analyse_source(src, "t.py")
+        self.assertEqual(n, 2)
+        self.assertEqual(sorted(f.test for f in findings),
+                         ["TestA.test_x", "TestB.test_x"])
+
+    def test_a_class_method_using_a_non_default_mock_alias_is_recognized(self):
+        # If `mocks=ctx` were dropped for class-based tests (falling back to
+        # DEFAULT_MOCK_CONTEXT), a mock built through a non-default alias
+        # would go unrecognized only inside a class -- module-level
+        # functions receive `mocks=ctx` on a separate, untouched line.
+        src = """
+from unittest import mock as um
+
+class T(unittest.TestCase):
+    def test_x(self):
+        client = um.Mock()
+        client.send("hi")
+        client.send.assert_called_once_with("hi")
+"""
+        self.assertEqual(rules(src), ["mock-only"])
+
+
+class TestIsMockFactoryCallOnAComputedCallable(unittest.TestCase):
+    """`_is_mock_factory_call`'s empty-`names` fallback (detectors.py
+    ~295-296): a call through a callable that is not rooted in a plain
+    dotted name (`(a or b)()`) must not be treated as a mock construction --
+    it is ordinary, unrelated production code that happens to run alongside
+    a mock (audit/mutants/SuiteAudit.md, section 4, item 9)."""
+
+    def test_a_call_through_a_computed_callable_is_production_code(self):
+        src = """
+def test_x():
+    m = Mock()
+    m.thing()
+    (real_a or real_b)()
+    m.thing.assert_called_once()
+"""
+        self.assertEqual(rules(src), [])
+
+
+class TestCallsOutsideMocksSelfRootedAssertionLikeCall(unittest.TestCase):
+    """`_calls_outside_mocks`'s `self`-receiver exclusion (detectors.py
+    ~552) is meant to let a real assertion helper called through `self` pass
+    without being read as "production code ran". A call whose name merely
+    LOOKS like an assertion (starts with `assert`) but is rooted somewhere
+    else entirely must still count as real, unexcluded production code
+    (audit/mutants/SuiteAudit.md, section 4, item 10)."""
+
+    def test_an_assert_named_helper_not_rooted_in_self_is_production_code(self):
+        src = """
+def test_x():
+    m = Mock()
+    m.run()
+    validators.assert_valid(42)
+    m.run.assert_called_once()
+"""
+        self.assertEqual(rules(src), [])
+
+
+class TestMockVariablesOrdinaryAssignmentBeforeAMock(unittest.TestCase):
+    """`_mock_variables`'s `ast.walk` scan (detectors.py ~359-361): an
+    ordinary, non-mock assignment appearing before the mock-constructing one
+    in the same test body must not stop the scan from finding the mock that
+    comes after it (audit/mutants/SuiteAudit.md, section 4, item 13)."""
+
+    def test_a_plain_assignment_before_the_mock_does_not_hide_it(self):
+        src = """
+def test_x():
+    expected = 5
+    m = Mock()
+    m.thing()
+    m.thing.assert_called_once()
+"""
+        self.assertEqual(rules(src), ["mock-only"])
+
+
+class TestFoldSetLiteral(unittest.TestCase):
+    """`_fold`'s `ast.Set` clause (detectors.py ~454-455) is never exercised
+    -- the same class of gap the delivered patch (0001) closed for lists and
+    dicts, left open for set literals (audit/mutants/SuiteAudit.md, section
+    4, item 14)."""
+
+    def test_set_literal_equality_is_a_tautology(self):
+        src = ("class T(unittest.TestCase):\n    def test_x(self):\n"
+               "        self.assertEqual({1, 2}, {1, 2})\n")
+        self.assertEqual(rules(src), ["tautology"])
+
+
+class TestFailIsARealAssertion(unittest.TestCase):
+    """`_is_assertion_name`'s fallback (detectors.py ~318-320) recognizes
+    `fail` only because it is listed in `UNITTEST_ASSERTIONS` explicitly --
+    it is the one member of that set that does not start with `assert`, so
+    the `.startswith("assert")` half of the check cannot rescue it
+    (audit/mutants/SuiteAudit.md, section 4, item 15)."""
+
+    def test_self_fail_counts_as_an_assertion(self):
+        src = """
+class T(unittest.TestCase):
+    def test_x(self):
+        result = compute()
+        if result != 1:
+            self.fail("bad result")
+"""
+        self.assertNotIn("no-assertion", rules(src))
+
+
+class TestSuppressionsCommentScanDoesNotStopEarly(unittest.TestCase):
+    """`_suppressions`'s token scan (detectors.py ~567) must keep looking
+    past an ordinary comment that is not itself a suppress directive -- a
+    real `# suiteaudit: ignore` on a later line must not be missed just
+    because an unrelated comment came first in the file
+    (audit/mutants/SuiteAudit.md, section 4, item 4)."""
+
+    def test_an_ordinary_comment_does_not_hide_a_later_suppress_comment(self):
+        src = ("def test_x():  # just a note\n"
+               "    assert True  # suiteaudit: ignore[tautology]\n")
+        report = analyse_file(src, "t.py")
+        self.assertEqual(report.findings, [])
+        self.assertEqual([f.rule for f in report.suppressed], ["tautology"])
+
+
+class TestSuppressionMultiRuleCommaSplit(unittest.TestCase):
+    """`_suppressions` splits a multi-rule comment on `,` (detectors.py
+    ~575). The existing multi-rule regression test's only real finding is
+    the LAST rule named in the comment, which a whitespace-split would still
+    match by accident (the stray comma glues itself to every rule but the
+    last); this pins the FIRST rule instead, so a whitespace split would
+    leave it suppressed as `"no-assertion,"` and the real `no-assertion`
+    finding would leak through unsuppressed
+    (audit/mutants/SuiteAudit.md, section 4, item 16)."""
+
+    def test_the_first_rule_in_a_multi_rule_comment_is_still_suppressed(self):
+        src = "def test_x():  # suiteaudit: ignore[no-assertion, tautology]\n    compute()\n"
+        report = analyse_file(src, "t.py")
+        self.assertEqual(report.findings, [])
+        self.assertEqual([f.rule for f in report.suppressed], ["no-assertion"])
+
+
+class TestMockVariablesAnnotatedAssignment(unittest.TestCase):
+    """`_mock_variables`'s `ast.AnnAssign` branch (detectors.py ~353-354) is
+    never exercised: no fixture declares a mock with a type annotation
+    (`m: object = Mock()`) (audit/mutants/SuiteAudit.md, section 4, item
+    17)."""
+
+    def test_an_annotated_mock_assignment_is_recognized(self):
+        src = """
+def test_x():
+    m: object = Mock()
+    m.thing()
+    m.thing.assert_called_once()
+"""
+        self.assertEqual(rules(src), ["mock-only"])
