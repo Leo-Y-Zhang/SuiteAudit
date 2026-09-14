@@ -43,7 +43,7 @@ mypy/type-checker is configured.
 
 ## Test
 
-Full suite is fast (~0.1s, 118 tests) — just run it all:
+Full suite is fast (~0.1s, 160 tests) — just run it all:
 ```
 python -m unittest discover -s tests -v
 ```
@@ -61,7 +61,7 @@ The tool auditing its own tests is the gate it holds itself to:
 suiteaudit check tests
 ```
 (equivalently `.venv/bin/python -m suiteaudit check tests` if the console
-script isn't on PATH). A clean run reports `0 of 118 tests carry a finding
+script isn't on PATH). A clean run reports `0 of 160 tests carry a finding
 (100.0% clean)`, `VERDICT: PASS`, exit 0. CI additionally proves the gate can
 go red with three negative tests: a suite of nothing but `assert True` must
 FAIL, a file containing only a `# suiteaudit: ignore` comment must still be
