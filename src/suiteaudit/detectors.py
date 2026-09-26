@@ -624,6 +624,21 @@ def _is_inert_decorator(node: ast.AST) -> bool:
     return bool(names) and any(n in INERT_DECORATORS for n in names)
 
 
+# Calls and exceptions that end a test as skipped or expected-to-fail:
+# `pytest.skip()`, `self.skipTest()`, `pytest.xfail()`, `raise SkipTest`.
+SKIP_CALLS = frozenset({"skip", "skipTest", "xfail"})
+SKIP_EXCEPTIONS = frozenset({"SkipTest"})
+
+
+def _is_skip(stmt: ast.stmt) -> bool:
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+        return _attr_name(stmt.value.func) in SKIP_CALLS
+    if isinstance(stmt, ast.Raise) and stmt.exc is not None:
+        names = _dotted(stmt.exc)
+        return bool(names) and names[-1] in SKIP_EXCEPTIONS
+    return False
+
+
 # ---------------------------------------------------------------- detectors
 
 def detect_no_assertion(test: TestFunction) -> list[Finding]:
@@ -640,7 +655,9 @@ def detect_no_assertion(test: TestFunction) -> list[Finding]:
     body = [s for s in fn.body if not isinstance(s, ast.Pass)]
     body = [s for s in body
             if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
-    if not body:
+    if not body or all(_is_skip(s) for s in body):
+        # A test that does nothing but skip reports as skipped (or xfailed),
+        # never as passed, which is what `explain empty-test` recommends.
         return []
     return [Finding(
         rule="no-assertion", severity="medium", test=test.qualified,

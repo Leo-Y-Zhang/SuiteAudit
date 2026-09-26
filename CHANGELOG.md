@@ -23,6 +23,10 @@ All notable changes to SuiteAudit are recorded here. The format follows
 - Test classes nested in a test class (`class TestOuter: class TestInner:`),
   which pytest collects, were skipped: their tests were neither counted nor
   checked. They are now reported as `TestOuter.TestInner.test_x`.
+- A test whose body only skips (`pytest.skip(...)`, `self.skipTest(...)`,
+  `pytest.xfail(...)`, `raise SkipTest`) was reported as `no-assertion`,
+  though a runner reports it as skipped and `explain empty-test` recommends
+  exactly that for a placeholder.
 
 ## [0.1.0] - 2026-09-07
 

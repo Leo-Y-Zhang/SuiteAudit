@@ -386,6 +386,21 @@ def test_x():
 """
         self.assertNotIn("no-assertion", rules(src))
 
+    def test_a_body_that_only_skips_is_not_a_missing_assertion(self):
+        """`suiteaudit explain empty-test` advises marking a placeholder
+        skipped so that it reports as skipped; a runner reports these as
+        skipped or xfailed, never as passed."""
+        for body in ('pytest.skip("not yet")', 'self.skipTest("not yet")',
+                     'pytest.xfail("known bug")', 'raise unittest.SkipTest("x")',
+                     'raise SkipTest'):
+            src = f"def test_x(self):\n    \"\"\"Doc.\"\"\"\n    {body}\n"
+            self.assertEqual(rules(src), [], body)
+
+    def test_code_that_runs_before_a_skip_is_still_reported(self):
+        # Only a body that does nothing but skip is exempt.
+        src = 'def test_x():\n    compute()\n    pytest.skip("later")\n'
+        self.assertEqual(rules(src), ["no-assertion"])
+
 
 class TestSeverity(unittest.TestCase):
     def test_empty_and_tautology_are_high(self):
