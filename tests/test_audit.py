@@ -185,10 +185,6 @@ class TestSuppressionAtTheVerdict(unittest.TestCase):
         self.assertEqual(result.verdict()[0], "FAIL")
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class TestExclude(unittest.TestCase):
     """`exclude` drops files by a glob on their path relative to the root.
     pytest's own suite carries deliberately empty example tests under
@@ -398,3 +394,71 @@ class TestExcludeByAnIntermediateDirectorySegment(unittest.TestCase):
             trimmed = audit(d, exclude=["fixtures"])
         self.assertEqual((trimmed.n_files, trimmed.n_tests), (1, 1))
         self.assertEqual(trimmed.verdict()[0], "PASS")
+
+
+class TestWhatTheReportShows(unittest.TestCase):
+    def test_json_report_keys_are_stable(self):
+        """`--json` is for CI scripts; renaming a key breaks them silently."""
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "test_bad.py", VACUOUS)
+            write(d, "test_broken.py", "def test_x(:\n")
+            data = json.loads(to_json(audit(d)))
+        self.assertEqual(set(data), {
+            "verdict", "reason", "files_analysed", "tests_found",
+            "tests_with_findings", "score", "unparsed", "findings",
+            "suppressed_count", "suppressed"})
+        self.assertEqual((data["files_analysed"], data["tests_found"],
+                          data["tests_with_findings"], data["score"]), (1, 1, 1, 0.0))
+        self.assertEqual(set(data["unparsed"][0]), {"file", "error"})
+        self.assertEqual(data["findings"], [{
+            "rule": "tautology", "severity": "high", "test": "test_nothing",
+            "file": "test_bad.py", "line": 2,
+            "detail": data["findings"][0]["detail"], "evidence": "True"}])
+
+    def test_a_finding_in_a_directory_names_the_file_relative_to_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "unit"))
+            write(os.path.join(d, "unit"), "test_bad.py", VACUOUS)
+            result = audit(d)
+        self.assertEqual([f.file for f in result.findings],
+                         [os.path.join("unit", "test_bad.py")])
+
+    def test_an_unreadable_entry_names_the_file_and_the_error(self):
+        # A dangling symlink is listed by the walk and fails to open.
+        with tempfile.TemporaryDirectory() as d:
+            gone = os.path.join(d, "test_gone.py")
+            try:
+                os.symlink(os.path.join(d, "missing.py"), gone)
+            except OSError:  # Windows without the symlink privilege
+                self.skipTest("cannot create a symlink here")
+            write(d, "test_ok.py", HONEST)
+            result = audit(d)
+        self.assertEqual(len(result.unparsed), 1)
+        self.assertEqual(result.unparsed[0][0], gone)
+        self.assertIn("test_gone.py", result.unparsed[0][1])
+        self.assertEqual(result.verdict()[0], "PASS")
+
+
+class TestSkipAndExcludeArguments(unittest.TestCase):
+    def test_a_caller_supplied_skip_set_is_honoured(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "vendored"))
+            write(d, "test_ok.py", HONEST)
+            write(os.path.join(d, "vendored"), "test_bad.py", VACUOUS)
+            one = audit(d, skip={"vendored"}).verdict()[0]
+            many = audit_paths([d], skip={"vendored"}).verdict()[0]
+        self.assertEqual((one, many), ("PASS", "PASS"))
+
+    def test_excluding_a_file_passed_directly_leaves_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = write(d, "test_bad.py", VACUOUS)
+            result = audit(path, exclude=["test_bad.py"])
+        self.assertEqual((result.n_files, result.verdict()[0]), (0, "NO DATA"))
+
+    def test_a_pattern_can_name_a_nested_directory(self):
+        self.assertTrue(excluded("pkg/fixtures/sub/test_x.py", ["pkg/fixtures"]))
+        self.assertFalse(excluded("pkg/other/test_x.py", ["pkg/fixtures"]))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
