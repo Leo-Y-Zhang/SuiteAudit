@@ -172,8 +172,21 @@ class SuiteReport:
 
 
 def _is_test(node) -> bool:
+    """A function a test runner would collect. `@pytest.fixture def
+    test_client():` is named like a test but is a fixture, and pytest does
+    not collect it."""
     return (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name.startswith("test"))
+            and node.name.startswith("test")
+            and not any(_dotted(d)[-1:] == ["fixture"] for d in node.decorator_list))
+
+
+def _opts_out(node: ast.ClassDef) -> bool:
+    """`__test__ = False` in the class body: pytest's switch for a helper
+    class whose name happens to start with `Test`."""
+    return any(isinstance(s, ast.Assign)
+               and any(isinstance(t, ast.Name) and t.id == "__test__" for t in s.targets)
+               and isinstance(s.value, ast.Constant) and s.value.value is False
+               for s in node.body)
 
 
 def _dotted(node: ast.AST) -> list[str]:
@@ -214,6 +227,8 @@ def _is_test_class(node: ast.ClassDef, module_classes: dict[str, ast.ClassDef],
     imported from elsewhere under a name without `Test` in it is not
     recognised, and its methods are missed rather than guessed at.
     """
+    if _opts_out(node):
+        return False
     if node.name.startswith("Test") or node.name.endswith(("Test", "Tests", "TestCase")):
         return True
     for base in node.bases:
@@ -256,10 +271,22 @@ def collect_tests(tree: ast.AST, path: str) -> list[TestFunction]:
         if _is_test(node):
             out.append(TestFunction(node.name, node, path, mocks=ctx))
         elif isinstance(node, ast.ClassDef) and _is_test_class(node, module_classes):
-            for sub in node.body:
-                if _is_test(sub):
-                    out.append(TestFunction(sub.name, sub, path, node.name, mocks=ctx))
+            _collect_class(node, node.name, path, ctx, out)
     return out
+
+
+def _collect_class(node: ast.ClassDef, qualified: str, path: str,
+                   ctx: MockContext, out: list[TestFunction]) -> None:
+    """The tests in a collected class, and in the classes nested in it that
+    pytest also collects: those named `Test*` (reported by pytest as
+    `TestOuter::TestInner::test_x`). A nested class without that prefix is
+    collected by neither runner, whatever it subclasses."""
+    for sub in node.body:
+        if _is_test(sub):
+            out.append(TestFunction(sub.name, sub, path, qualified, mocks=ctx))
+        elif (isinstance(sub, ast.ClassDef) and sub.name.startswith("Test")
+              and not _opts_out(sub)):
+            _collect_class(sub, f"{qualified}.{sub.name}", path, ctx, out)
 
 
 def _calls(node: ast.AST):

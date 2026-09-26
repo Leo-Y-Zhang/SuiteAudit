@@ -15,6 +15,14 @@ All notable changes to SuiteAudit are recorded here. The format follows
 - `# suiteaudit: ignore` was honoured only at the start of a comment, so on a
   line that also carried another tool's pragma (`# noqa: B011  # suiteaudit:
   ignore[tautology]`) it was silently ignored and the finding stood.
+- A pytest fixture named like a test (`@pytest.fixture def test_client():`)
+  was counted as a test and reported as `no-assertion`. pytest does not
+  collect it, and neither does this tool now.
+- A class that opts out of pytest collection with `__test__ = False` had its
+  methods reported as tests.
+- Test classes nested in a test class (`class TestOuter: class TestInner:`),
+  which pytest collects, were skipped: their tests were neither counted nor
+  checked. They are now reported as `TestOuter.TestInner.test_x`.
 
 ## [0.1.0] - 2026-09-07
 

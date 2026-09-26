@@ -55,6 +55,63 @@ def make_fixture():
         self.assertEqual(count_tests(src), 0)
         self.assertEqual(rules(src), [])
 
+    def test_a_fixture_named_like_a_test_is_not_a_test(self):
+        """`@pytest.fixture def test_client():` is common in Flask and FastAPI
+        suites; pytest does not collect it, and a fixture that returns a value
+        without asserting is doing its job."""
+        for deco in ("@pytest.fixture", "@pytest.fixture(scope='module')",
+                     "@fixture", "@pytest_asyncio.fixture"):
+            src = deco + "\ndef test_client():\n    return make_app().test_client()\n"
+            self.assertEqual(count_tests(src), 0, deco)
+            self.assertEqual(rules(src), [], deco)
+
+    def test_a_nested_test_class_is_collected(self):
+        """pytest collects `Test*` classes nested in a test class, and
+        reports them as `TestOuter::TestInner::test_x`."""
+        src = """
+class TestOuter:
+    class TestInner:
+        def test_x(self):
+            pass
+
+    def test_y(self):
+        assert compute() == 1
+"""
+        findings, n = analyse_source(src, "t.py")
+        self.assertEqual(n, 2)
+        self.assertEqual([(f.rule, f.test) for f in findings],
+                         [("empty-test", "TestOuter.TestInner.test_x")])
+
+    def test_a_nested_class_pytest_would_not_collect_is_not_a_test(self):
+        # Neither pytest nor unittest collects a nested class without the
+        # `Test` prefix, even a TestCase subclass.
+        src = """
+class TestOuter:
+    class Helper:
+        def test_x(self):
+            pass
+
+    class InnerCase(unittest.TestCase):
+        def test_y(self):
+            pass
+
+    def test_z(self):
+        assert compute() == 1
+"""
+        self.assertEqual(count_tests(src), 1)
+        self.assertEqual(rules(src), [])
+
+    def test_a_class_that_opts_out_with_dunder_test_is_not_collected(self):
+        # `__test__ = False` is pytest's switch for a helper class whose name
+        # starts with Test (`TestClient`, `TestConfig`).
+        for outer in ("", "class TestOuter:\n"):
+            indent = "    " if outer else ""
+            src = outer + "".join(indent + line + "\n" for line in (
+                "class TestHelper:", "    __test__ = False",
+                "    def test_x(self):", "        pass"))
+            self.assertEqual(count_tests(src), 0, src)
+            self.assertEqual(rules(src), [], src)
+
 
 class TestEmptyTest(unittest.TestCase):
     def test_pass_only_body_is_caught(self):
