@@ -214,15 +214,20 @@ The eight suites after the fix, as printed by `python tools/case_study.py`
 | encode/httpx | `b5addb6` | 539 | 2 | 0 | 0 | WARN |
 | Textualize/rich | `9d8f9a3` | 694 | 10 | 0 | 0 | WARN |
 | pydantic/pydantic | `2261ae1` | 2799 | 105 | 0 | 0 | WARN |
-| pytest-dev/pytest (excluding example_scripts/*) | `431f3e1` | 2742 | 501 | 0 | 0 | WARN |
+| pytest-dev/pytest (excluding example_scripts/*) | `431f3e1` | 2741 | 500 | 0 | 0 | WARN |
 | django/django | `177fb98` | 9745 | 423 | 2 | 1 | FAIL |
 | psf/black | `20622e1` | 259 | 25 | 0 | 0 | WARN |
 | urllib3/urllib3 | `278d98d` | 883 | 55 | 0 | 0 | WARN |
 
 Every medium finding is `no-assertion`. The two high findings are the two
 deliberately empty Django tests; the low finding is the decorated one. Across
-all eleven suites, 19,659 tests, every high finding that remains can be
+all eleven suites, 19,584 tests, every high finding that remains can be
 confirmed by reading the flagged line.
+
+The pytest row is one test and one finding lower than at 0.1.0 (2742, 501):
+`TestClassicOutputStyle.test_files` in `testing/test_terminal.py` is a
+`@pytest.fixture`, which pytest does not collect, and it was counted as a test
+and reported as `no-assertion`. The other ten rows are unchanged.
 
 ## Layout
 

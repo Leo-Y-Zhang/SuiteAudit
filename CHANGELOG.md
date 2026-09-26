@@ -23,7 +23,9 @@ All notable changes to SuiteAudit are recorded here. The format follows
   ignore[tautology]`) it was silently ignored and the finding stood.
 - A pytest fixture named like a test (`@pytest.fixture def test_client():`)
   was counted as a test and reported as `no-assertion`. pytest does not
-  collect it, and neither does this tool now.
+  collect it, and neither does this tool now. In the README's measurement
+  this removes one false `no-assertion` from pytest's suite
+  (`TestClassicOutputStyle.test_files`); no other suite changes.
 - A class that opts out of pytest collection with `__test__ = False` had its
   methods reported as tests.
 - Test classes nested in a test class (`class TestOuter: class TestInner:`),
