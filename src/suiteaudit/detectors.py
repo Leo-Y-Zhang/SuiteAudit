@@ -706,7 +706,7 @@ def _tautology(test: TestFunction, node: ast.AST, detail: str,
 def detect_tautology(test: TestFunction) -> list[Finding]:
     """Assertions whose truth is fixed by the language before any code under
     test runs: `assert True`, `assert 1 == 1`, `assertEqual(2, 2)`,
-    `assert x is x`.
+    `assert x is x`, `assert (x == 1, "msg")`.
 
     `assert x == x` is deliberately NOT here. Equality calls `x.__eq__`, which
     is user code and can legitimately return False (float NaN does), and a
@@ -742,6 +742,14 @@ def detect_tautology(test: TestFunction) -> list[Finding]:
                 out.append(_tautology(
                     test, node, "a name is compared to itself with `is`; "
                     "identity is reflexive by definition", t))
+            elif (isinstance(t, ast.Tuple)
+                  and any(not isinstance(e, ast.Starred) for e in t.elts)):
+                # `assert (got == 4, "msg")`: a non-empty tuple is true
+                # whatever it holds. `(*xs,)` may be empty, so it is left.
+                out.append(_tautology(
+                    test, node, "assertion is a non-empty tuple, which is "
+                    "always true; the parentheses probably belong around "
+                    "the condition only", t))
         elif isinstance(node, ast.Call):
             name = _attr_name(node.func)
             if name in {"assertEqual", "assertIs", "assertAlmostEqual"} \

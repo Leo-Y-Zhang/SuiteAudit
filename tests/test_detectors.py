@@ -138,6 +138,25 @@ class TestTautology(unittest.TestCase):
         src = "def test_x():\n    got = compute()\n    assert got is got\n"
         self.assertIn("tautology", rules(src))
 
+    def test_a_parenthesised_message_makes_the_assertion_a_tuple(self):
+        """`assert (got == 4, "msg")` asserts a two-element tuple, which is
+        true whatever `got` is. Python itself warns "assertion is always
+        true, perhaps remove parentheses?"."""
+        src = 'def test_x():\n    got = compute()\n    assert (got == 4, "wrong total")\n'
+        findings, _ = analyse_source(src, "t.py")
+        self.assertEqual([(f.rule, f.severity, f.line) for f in findings],
+                         [("tautology", "high", 3)])
+
+    def test_a_parenthesised_condition_with_a_message_is_fine(self):
+        # The same characters, one comma apart: a condition, then a message.
+        src = 'def test_x():\n    got = compute()\n    assert (got == 4), "wrong total"\n'
+        self.assertEqual(rules(src), [])
+
+    def test_a_tuple_that_may_be_empty_is_not_a_tautology(self):
+        # `(*items,)` is empty when `items` is.
+        src = "def test_x():\n    assert (*compute(),)\n"
+        self.assertEqual(rules(src), [])
+
     def test_unittest_assert_equal_with_two_constants(self):
         src = ("class T(unittest.TestCase):\n    def test_x(self):\n"
                "        self.assertEqual(2, 2)\n")

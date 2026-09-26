@@ -32,7 +32,7 @@ cheapest route is a mock asserting on itself.
 | rule | severity | what it means |
 |---|---|---|
 | `empty-test` | high, or low under a decorator the tool does not know | body is empty or a docstring; always passes |
-| `tautology` | high, or low beside real assertions | `assert True`, `assertEqual(2, 2)`, `assert x is x`; never `assert False`, which is a fail-marker |
+| `tautology` | high, or low beside real assertions | `assert True`, `assertEqual(2, 2)`, `assert x is x`, `assert (x == 1, "msg")`; never `assert False`, which is a fail-marker |
 | `mock-only` | high | every assertion inspects a mock the test itself built, and nothing but mocks and builtins is called; no production code runs |
 | `no-assertion` | medium | runs code but asserts nothing, so it only catches crashes |
 

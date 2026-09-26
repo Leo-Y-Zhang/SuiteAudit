@@ -6,6 +6,12 @@ All notable changes to SuiteAudit are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `tautology` reports `assert (x == 1, "msg")`: the parentheses make the
+  assertion a non-empty tuple, which is always true. `assert (x == 1), "msg"`
+  is not reported, nor a tuple that may be empty (`(*xs,)`).
+
 ### Fixed
 
 - A test file saved with a UTF-8 byte order mark, or declaring its encoding

@@ -52,7 +52,8 @@ RULE_HELP = {
     ),
     "tautology": (
         "The assertion's truth is fixed by the language before the code under "
-        "test runs: `assert True`, `assertEqual(2, 2)`, `assert x is x`. "
+        "test runs: `assert True`, `assertEqual(2, 2)`, `assert x is x`, and "
+        "`assert (x == 1, \"msg\")`, which asserts a non-empty tuple. "
         "`assert x == x` is not flagged: equality calls `__eq__`, which is "
         "user code and can legitimately be false. `assert False` and "
         "`assert 0` are not flagged either: they are fail-markers, and a test "
