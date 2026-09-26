@@ -421,6 +421,16 @@ class TestSuppression(unittest.TestCase):
         self.assertEqual(report.findings, [])
         self.assertEqual(len(report.suppressed), 1)
 
+    def test_ignore_after_another_tool_s_pragma_in_the_same_comment(self):
+        """Python ends a line with at most one comment, so a second pragma
+        shares the comment token of the first: `# noqa: B011  # suiteaudit:
+        ignore[...]` is how a line carrying both is written."""
+        src = ("def test_x():\n"
+               "    assert True  # noqa: B011  # suiteaudit: ignore[tautology]\n")
+        report = analyse_file(src, "t.py")
+        self.assertEqual(report.findings, [])
+        self.assertEqual([f.rule for f in report.suppressed], ["tautology"])
+
     # --- must NOT suppress ---------------------------------------------
     def test_ignore_for_a_different_rule_does_not_suppress(self):
         src = "def test_x():  # suiteaudit: ignore[mock-only]\n    assert True\n"

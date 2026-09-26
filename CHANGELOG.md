@@ -12,6 +12,9 @@ All notable changes to SuiteAudit are recorded here. The format follows
   with a PEP 263 comment (`# -*- coding: latin-1 -*-`), was reported as
   unparsed and left unchecked, though Python runs both. Files are now decoded
   the way the interpreter decodes them.
+- `# suiteaudit: ignore` was honoured only at the start of a comment, so on a
+  line that also carried another tool's pragma (`# noqa: B011  # suiteaudit:
+  ignore[tautology]`) it was silently ignored and the finding stood.
 
 ## [0.1.0] - 2026-09-07
 

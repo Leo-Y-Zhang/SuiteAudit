@@ -94,7 +94,9 @@ SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 # `# suiteaudit: ignore` or `# suiteaudit: ignore[rule, rule]` on the flagged
 # line or on the test's `def` line. Matched on real comment tokens, never on
-# the text of a string literal.
+# the text of a string literal, and anywhere in the comment, since a line
+# carrying another tool's pragma too has only one comment token:
+# `# noqa: B011  # suiteaudit: ignore[tautology]`.
 SUPPRESS_RE = re.compile(r"#\s*suiteaudit:\s*ignore(?:\[([^\]]*)\])?")
 
 # Limits on what a constant expression may contain before the tool will
@@ -564,7 +566,7 @@ def _suppressions(source: str) -> dict[int, frozenset[str] | None]:
         for tok in tokenize.generate_tokens(io.StringIO(source).readline):
             if tok.type != tokenize.COMMENT:
                 continue
-            m = SUPPRESS_RE.match(tok.string)
+            m = SUPPRESS_RE.search(tok.string)
             if not m:
                 continue
             spec = m.group(1)

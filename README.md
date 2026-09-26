@@ -80,7 +80,9 @@ def test_collaborator_contract():  # suiteaudit: ignore[mock-only]
 ```
 
 The comment goes on the test's `def` line or on the flagged line, and takes a
-rule name, a comma-separated list, or nothing (every rule). Set-aside findings
+rule name, a comma-separated list, or nothing (every rule). It may follow
+another tool's pragma in the same comment (`# noqa: B011  # suiteaudit:
+ignore[tautology]`). Set-aside findings
 are counted and listed in the report and in the JSON (`suppressed_count`,
 `suppressed`), never silently dropped, and no suppression can turn `NO DATA`
 into `PASS`.
