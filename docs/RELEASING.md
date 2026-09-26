@@ -36,12 +36,17 @@ publishes on a version tag; nothing is published without one.
    git push origin v0.1.0
    ```
 
-   The Release workflow then: checks the tag matches the version, builds the
-   sdist and wheel, runs `twine check`, installs the wheel into a fresh
+   The Release workflow then: checks the tag matches the version, runs the
+   unit tests, builds the sdist and wheel, runs `twine check`, installs the wheel into a fresh
    environment and runs it, publishes to PyPI through the `pypi` environment,
    and creates the GitHub release with the artifacts attached.
 3. Confirm: `pip install suiteaudit==0.1.0` in a fresh environment, then
    `suiteaudit --version`.
+
+The workflow's actions are pinned to commit SHAs, with the tag each was
+taken from in a comment. To move one, resolve the new tag with
+`git ls-remote https://github.com/<owner>/<action> refs/tags/<tag>` and
+replace both the SHA and the comment.
 
 ## GitHub Marketplace (the action)
 
