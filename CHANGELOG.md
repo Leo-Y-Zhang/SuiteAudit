@@ -28,9 +28,11 @@ All notable changes to SuiteAudit are recorded here. The format follows
   (`TestClassicOutputStyle.test_files`); no other suite changes.
 - A class that opts out of pytest collection with `__test__ = False` had its
   methods reported as tests.
-- Test classes nested in a test class (`class TestOuter: class TestInner:`),
-  which pytest collects, were skipped: their tests were neither counted nor
-  checked. They are now reported as `TestOuter.TestInner.test_x`.
+- Test classes nested in a plain test class (`class TestOuter: class
+  TestInner:`), which pytest collects, were skipped: their tests were neither
+  counted nor checked. They are now reported as `TestOuter.TestInner.test_x`.
+  Classes nested in a `unittest.TestCase`, which no runner collects, are
+  still left out.
 - A test whose body only skips (`pytest.skip(...)`, `self.skipTest(...)`,
   `pytest.xfail(...)`, `raise SkipTest`) was reported as `no-assertion`,
   though a runner reports it as skipped and `explain empty-test` recommends

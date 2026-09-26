@@ -278,14 +278,20 @@ def collect_tests(tree: ast.AST, path: str) -> list[TestFunction]:
 def _collect_class(node: ast.ClassDef, qualified: str, path: str,
                    ctx: MockContext, out: list[TestFunction]) -> None:
     """The tests in a collected class, and in the classes nested in it that
-    pytest also collects: those named `Test*` (reported by pytest as
-    `TestOuter::TestInner::test_x`). A nested class without that prefix is
-    collected by neither runner, whatever it subclasses."""
+    pytest also collects (reported by pytest as `TestOuter::TestInner::test_x`).
+
+    pytest looks inside a plain class for nested `Test*` classes, but not
+    inside a unittest.TestCase, and unittest never does. A class with any
+    base might be a TestCase, so only a class with no base (or `object`) is
+    searched; a nested class there without the `Test` prefix is collected by
+    neither runner."""
+    plain = (all(_dotted(b) == ["object"] for b in node.bases)
+             and not node.keywords)
     for sub in node.body:
         if _is_test(sub):
             out.append(TestFunction(sub.name, sub, path, qualified, mocks=ctx))
-        elif (isinstance(sub, ast.ClassDef) and sub.name.startswith("Test")
-              and not _opts_out(sub)):
+        elif (plain and isinstance(sub, ast.ClassDef)
+              and sub.name.startswith("Test") and not _opts_out(sub)):
             _collect_class(sub, f"{qualified}.{sub.name}", path, ctx, out)
 
 
@@ -626,13 +632,14 @@ def _is_inert_decorator(node: ast.AST) -> bool:
 
 # Calls and exceptions that end a test as skipped or expected-to-fail:
 # `pytest.skip()`, `self.skipTest()`, `pytest.xfail()`, `raise SkipTest`.
-SKIP_CALLS = frozenset({"skip", "skipTest", "xfail"})
+SKIP_CALLS = frozenset({("pytest", "skip"), ("self", "skipTest"), ("pytest", "xfail")})
 SKIP_EXCEPTIONS = frozenset({"SkipTest"})
 
 
 def _is_skip(stmt: ast.stmt) -> bool:
     if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-        return _attr_name(stmt.value.func) in SKIP_CALLS
+        # By receiver as well as name: `stream.skip(4)` is production code.
+        return tuple(_dotted(stmt.value.func)) in SKIP_CALLS
     if isinstance(stmt, ast.Raise) and stmt.exc is not None:
         names = _dotted(stmt.exc)
         return bool(names) and names[-1] in SKIP_EXCEPTIONS

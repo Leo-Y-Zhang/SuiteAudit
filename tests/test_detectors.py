@@ -105,8 +105,17 @@ class TestOuter:
 
     def test_z(self):
         assert compute() == 1
+
+class TestCaseOuter(unittest.TestCase):
+    # pytest does not look for classes inside a TestCase.
+    class TestInner:
+        def test_w(self):
+            pass
+
+    def test_v(self):
+        assert compute() == 1
 """
-        self.assertEqual(count_tests(src), 1)
+        self.assertEqual(count_tests(src), 2)
         self.assertEqual(rules(src), [])
 
     def test_a_class_that_opts_out_with_dunder_test_is_not_collected(self):
@@ -435,6 +444,10 @@ def test_x():
 
     def test_raising_something_other_than_skip_is_not_a_skip(self):
         src = "def test_x():\n    raise NotImplementedError\n"
+        self.assertEqual(rules(src), ["no-assertion"])
+
+    def test_a_production_method_called_skip_is_not_a_skip(self):
+        src = "def test_x():\n    stream.skip(4)\n"
         self.assertEqual(rules(src), ["no-assertion"])
 
 
