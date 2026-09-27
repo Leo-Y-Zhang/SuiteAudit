@@ -94,7 +94,9 @@ SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 # `# suiteaudit: ignore` or `# suiteaudit: ignore[rule, rule]` on the flagged
 # line or on the test's `def` line. Matched on real comment tokens, never on
-# the text of a string literal.
+# the text of a string literal, and anywhere in the comment, since a line
+# carrying another tool's pragma too has only one comment token:
+# `# noqa: B011  # suiteaudit: ignore[tautology]`.
 SUPPRESS_RE = re.compile(r"#\s*suiteaudit:\s*ignore(?:\[([^\]]*)\])?")
 
 # Limits on what a constant expression may contain before the tool will
@@ -170,8 +172,21 @@ class SuiteReport:
 
 
 def _is_test(node) -> bool:
+    """A function a test runner would collect. `@pytest.fixture def
+    test_client():` is named like a test but is a fixture, and pytest does
+    not collect it."""
     return (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name.startswith("test"))
+            and node.name.startswith("test")
+            and not any(_dotted(d)[-1:] == ["fixture"] for d in node.decorator_list))
+
+
+def _opts_out(node: ast.ClassDef) -> bool:
+    """`__test__ = False` in the class body: pytest's switch for a helper
+    class whose name happens to start with `Test`."""
+    return any(isinstance(s, ast.Assign)
+               and any(isinstance(t, ast.Name) and t.id == "__test__" for t in s.targets)
+               and isinstance(s.value, ast.Constant) and s.value.value is False
+               for s in node.body)
 
 
 def _dotted(node: ast.AST) -> list[str]:
@@ -212,6 +227,8 @@ def _is_test_class(node: ast.ClassDef, module_classes: dict[str, ast.ClassDef],
     imported from elsewhere under a name without `Test` in it is not
     recognised, and its methods are missed rather than guessed at.
     """
+    if _opts_out(node):
+        return False
     if node.name.startswith("Test") or node.name.endswith(("Test", "Tests", "TestCase")):
         return True
     for base in node.bases:
@@ -254,10 +271,28 @@ def collect_tests(tree: ast.AST, path: str) -> list[TestFunction]:
         if _is_test(node):
             out.append(TestFunction(node.name, node, path, mocks=ctx))
         elif isinstance(node, ast.ClassDef) and _is_test_class(node, module_classes):
-            for sub in node.body:
-                if _is_test(sub):
-                    out.append(TestFunction(sub.name, sub, path, node.name, mocks=ctx))
+            _collect_class(node, node.name, path, ctx, out)
     return out
+
+
+def _collect_class(node: ast.ClassDef, qualified: str, path: str,
+                   ctx: MockContext, out: list[TestFunction]) -> None:
+    """The tests in a collected class, and in the classes nested in it that
+    pytest also collects (reported by pytest as `TestOuter::TestInner::test_x`).
+
+    pytest looks inside a plain class for nested `Test*` classes, but not
+    inside a unittest.TestCase, and unittest never does. A class with any
+    base might be a TestCase, so only a class with no base (or `object`) is
+    searched; a nested class there without the `Test` prefix is collected by
+    neither runner."""
+    plain = (all(_dotted(b) == ["object"] for b in node.bases)
+             and not node.keywords)
+    for sub in node.body:
+        if _is_test(sub):
+            out.append(TestFunction(sub.name, sub, path, qualified, mocks=ctx))
+        elif (plain and isinstance(sub, ast.ClassDef)
+              and sub.name.startswith("Test") and not _opts_out(sub)):
+            _collect_class(sub, f"{qualified}.{sub.name}", path, ctx, out)
 
 
 def _calls(node: ast.AST):
@@ -564,7 +599,7 @@ def _suppressions(source: str) -> dict[int, frozenset[str] | None]:
         for tok in tokenize.generate_tokens(io.StringIO(source).readline):
             if tok.type != tokenize.COMMENT:
                 continue
-            m = SUPPRESS_RE.match(tok.string)
+            m = SUPPRESS_RE.search(tok.string)
             if not m:
                 continue
             spec = m.group(1)
@@ -595,6 +630,22 @@ def _is_inert_decorator(node: ast.AST) -> bool:
     return bool(names) and any(n in INERT_DECORATORS for n in names)
 
 
+# Calls and exceptions that end a test as skipped or expected-to-fail:
+# `pytest.skip()`, `self.skipTest()`, `pytest.xfail()`, `raise SkipTest`.
+SKIP_CALLS = frozenset({("pytest", "skip"), ("self", "skipTest"), ("pytest", "xfail")})
+SKIP_EXCEPTIONS = frozenset({"SkipTest"})
+
+
+def _is_skip(stmt: ast.stmt) -> bool:
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+        # By receiver as well as name: `stream.skip(4)` is production code.
+        return tuple(_dotted(stmt.value.func)) in SKIP_CALLS
+    if isinstance(stmt, ast.Raise) and stmt.exc is not None:
+        names = _dotted(stmt.exc)
+        return bool(names) and names[-1] in SKIP_EXCEPTIONS
+    return False
+
+
 # ---------------------------------------------------------------- detectors
 
 def detect_no_assertion(test: TestFunction) -> list[Finding]:
@@ -611,7 +662,9 @@ def detect_no_assertion(test: TestFunction) -> list[Finding]:
     body = [s for s in fn.body if not isinstance(s, ast.Pass)]
     body = [s for s in body
             if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
-    if not body:
+    if not body or all(_is_skip(s) for s in body):
+        # A test that does nothing but skip reports as skipped (or xfailed),
+        # never as passed, which is what `explain empty-test` recommends.
         return []
     return [Finding(
         rule="no-assertion", severity="medium", test=test.qualified,
@@ -660,7 +713,7 @@ def _tautology(test: TestFunction, node: ast.AST, detail: str,
 def detect_tautology(test: TestFunction) -> list[Finding]:
     """Assertions whose truth is fixed by the language before any code under
     test runs: `assert True`, `assert 1 == 1`, `assertEqual(2, 2)`,
-    `assert x is x`.
+    `assert x is x`, `assert (x == 1, "msg")`.
 
     `assert x == x` is deliberately NOT here. Equality calls `x.__eq__`, which
     is user code and can legitimately return False (float NaN does), and a
@@ -696,6 +749,14 @@ def detect_tautology(test: TestFunction) -> list[Finding]:
                 out.append(_tautology(
                     test, node, "a name is compared to itself with `is`; "
                     "identity is reflexive by definition", t))
+            elif (isinstance(t, ast.Tuple)
+                  and any(not isinstance(e, ast.Starred) for e in t.elts)):
+                # `assert (got == 4, "msg")`: a non-empty tuple is true
+                # whatever it holds. `(*xs,)` may be empty, so it is left.
+                out.append(_tautology(
+                    test, node, "assertion is a non-empty tuple, which is "
+                    "always true; the parentheses probably belong around "
+                    "the condition only", t))
         elif isinstance(node, ast.Call):
             name = _attr_name(node.func)
             if name in {"assertEqual", "assertIs", "assertAlmostEqual"} \

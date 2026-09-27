@@ -32,7 +32,7 @@ cheapest route is a mock asserting on itself.
 | rule | severity | what it means |
 |---|---|---|
 | `empty-test` | high, or low under a decorator the tool does not know | body is empty or a docstring; always passes |
-| `tautology` | high, or low beside real assertions | `assert True`, `assertEqual(2, 2)`, `assert x is x`; never `assert False`, which is a fail-marker |
+| `tautology` | high, or low beside real assertions | `assert True`, `assertEqual(2, 2)`, `assert x is x`, `assert (x == 1, "msg")`; never `assert False`, which is a fail-marker |
 | `mock-only` | high | every assertion inspects a mock the test itself built, and nothing but mocks and builtins is called; no production code runs |
 | `no-assertion` | medium | runs code but asserts nothing, so it only catches crashes |
 
@@ -80,7 +80,9 @@ def test_collaborator_contract():  # suiteaudit: ignore[mock-only]
 ```
 
 The comment goes on the test's `def` line or on the flagged line, and takes a
-rule name, a comma-separated list, or nothing (every rule). Set-aside findings
+rule name, a comma-separated list, or nothing (every rule). It may follow
+another tool's pragma in the same comment (`# noqa: B011  # suiteaudit:
+ignore[tautology]`). Set-aside findings
 are counted and listed in the report and in the JSON (`suppressed_count`,
 `suppressed`), never silently dropped, and no suppression can turn `NO DATA`
 into `PASS`.
@@ -212,15 +214,20 @@ The eight suites after the fix, as printed by `python tools/case_study.py`
 | encode/httpx | `b5addb6` | 539 | 2 | 0 | 0 | WARN |
 | Textualize/rich | `9d8f9a3` | 694 | 10 | 0 | 0 | WARN |
 | pydantic/pydantic | `2261ae1` | 2799 | 105 | 0 | 0 | WARN |
-| pytest-dev/pytest (excluding example_scripts/*) | `431f3e1` | 2742 | 501 | 0 | 0 | WARN |
+| pytest-dev/pytest (excluding example_scripts/*) | `431f3e1` | 2741 | 500 | 0 | 0 | WARN |
 | django/django | `177fb98` | 9745 | 423 | 2 | 1 | FAIL |
 | psf/black | `20622e1` | 259 | 25 | 0 | 0 | WARN |
 | urllib3/urllib3 | `278d98d` | 883 | 55 | 0 | 0 | WARN |
 
 Every medium finding is `no-assertion`. The two high findings are the two
 deliberately empty Django tests; the low finding is the decorated one. Across
-all eleven suites, 19,659 tests, every high finding that remains can be
+all eleven suites, 19,584 tests, every high finding that remains can be
 confirmed by reading the flagged line.
+
+The pytest row is one test and one finding lower than at 0.1.0 (2742, 501):
+`TestClassicOutputStyle.test_files` in `testing/test_terminal.py` is a
+`@pytest.fixture`, which pytest does not collect, and it was counted as a test
+and reported as `no-assertion`. The other ten rows are unchanged.
 
 ## Layout
 

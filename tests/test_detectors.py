@@ -55,6 +55,84 @@ def make_fixture():
         self.assertEqual(count_tests(src), 0)
         self.assertEqual(rules(src), [])
 
+    def test_a_fixture_named_like_a_test_is_not_a_test(self):
+        """`@pytest.fixture def test_client():` is common in Flask and FastAPI
+        suites; pytest does not collect it, and a fixture that returns a value
+        without asserting is doing its job."""
+        for deco in ("@pytest.fixture", "@pytest.fixture(scope='module')",
+                     "@fixture", "@pytest_asyncio.fixture"):
+            src = deco + "\ndef test_client():\n    return make_app().test_client()\n"
+            self.assertEqual(count_tests(src), 0, deco)
+            self.assertEqual(rules(src), [], deco)
+
+    def test_a_nested_test_class_is_collected(self):
+        """pytest collects `Test*` classes nested in a test class, and
+        reports them as `TestOuter::TestInner::test_x`."""
+        src = """
+from unittest import mock
+
+class TestOuter:
+    class TestInner:
+        def test_x(self):
+            pass
+
+        def test_mocked(self):
+            m = mock.Mock()
+            m()
+            m.assert_called_once()
+
+    def test_y(self):
+        assert compute() == 1
+"""
+        findings, n = analyse_source(src, "t.py")
+        self.assertEqual(n, 3)
+        self.assertEqual(sorted((f.rule, f.test, f.file) for f in findings),
+                         [("empty-test", "TestOuter.TestInner.test_x", "t.py"),
+                          ("mock-only", "TestOuter.TestInner.test_mocked", "t.py")])
+
+    def test_a_nested_class_pytest_would_not_collect_is_not_a_test(self):
+        # Neither pytest nor unittest collects a nested class without the
+        # `Test` prefix, even a TestCase subclass.
+        src = """
+class TestOuter:
+    class Helper:
+        def test_x(self):
+            pass
+
+    class InnerCase(unittest.TestCase):
+        def test_y(self):
+            pass
+
+    def test_z(self):
+        assert compute() == 1
+
+class TestCaseOuter(unittest.TestCase):
+    # pytest does not look for classes inside a TestCase.
+    class TestInner:
+        def test_w(self):
+            pass
+
+    def test_v(self):
+        assert compute() == 1
+"""
+        self.assertEqual(count_tests(src), 2)
+        self.assertEqual(rules(src), [])
+
+    def test_a_class_that_opts_out_with_dunder_test_is_not_collected(self):
+        # `__test__ = False` is pytest's switch for a helper class whose name
+        # starts with Test (`TestClient`, `TestConfig`).
+        for outer in ("", "class TestOuter:\n"):
+            indent = "    " if outer else ""
+            src = outer + "".join(indent + line + "\n" for line in (
+                "class TestHelper:", "    __test__ = False",
+                "    def test_x(self):", "        pass"))
+            self.assertEqual(count_tests(src), 0, src)
+            self.assertEqual(rules(src), [], src)
+
+    def test_an_ordinary_false_class_attribute_does_not_opt_out(self):
+        src = "class TestFlags:\n    enabled = False\n    def test_x(self):\n        pass\n"
+        self.assertEqual(rules(src), ["empty-test"])
+
 
 class TestEmptyTest(unittest.TestCase):
     def test_pass_only_body_is_caught(self):
@@ -80,6 +158,25 @@ class TestTautology(unittest.TestCase):
         """`x is x` is true by the definition of `is`; no user code runs."""
         src = "def test_x():\n    got = compute()\n    assert got is got\n"
         self.assertIn("tautology", rules(src))
+
+    def test_a_parenthesised_message_makes_the_assertion_a_tuple(self):
+        """`assert (got == 4, "msg")` asserts a two-element tuple, which is
+        true whatever `got` is. Python itself warns "assertion is always
+        true, perhaps remove parentheses?"."""
+        src = 'def test_x():\n    got = compute()\n    assert (got == 4, "wrong total")\n'
+        findings, _ = analyse_source(src, "t.py")
+        self.assertEqual([(f.rule, f.severity, f.line) for f in findings],
+                         [("tautology", "high", 3)])
+
+    def test_a_parenthesised_condition_with_a_message_is_fine(self):
+        # The same characters, one comma apart: a condition, then a message.
+        src = 'def test_x():\n    got = compute()\n    assert (got == 4), "wrong total"\n'
+        self.assertEqual(rules(src), [])
+
+    def test_a_tuple_that_may_be_empty_is_not_a_tautology(self):
+        # `(*items,)` is empty when `items` is.
+        src = "def test_x():\n    assert (*compute(),)\n"
+        self.assertEqual(rules(src), [])
 
     def test_unittest_assert_equal_with_two_constants(self):
         src = ("class T(unittest.TestCase):\n    def test_x(self):\n"
@@ -329,6 +426,30 @@ def test_x():
 """
         self.assertNotIn("no-assertion", rules(src))
 
+    def test_a_body_that_only_skips_is_not_a_missing_assertion(self):
+        """`suiteaudit explain empty-test` advises marking a placeholder
+        skipped so that it reports as skipped; a runner reports these as
+        skipped or xfailed, never as passed."""
+        for body in ('pytest.skip("not yet")', 'self.skipTest("not yet")',
+                     'pytest.xfail("known bug")', 'raise unittest.SkipTest("x")',
+                     'raise SkipTest'):
+            src = f"def test_x(self):\n    \"\"\"Doc.\"\"\"\n    {body}\n"
+            self.assertEqual(rules(src), [], body)
+
+    def test_code_that_runs_before_a_skip_is_still_reported(self):
+        # Only a body that does nothing but skip is exempt.
+        for first in ("compute()", "result = compute()"):
+            src = f'def test_x():\n    {first}\n    pytest.skip("later")\n'
+            self.assertEqual(rules(src), ["no-assertion"], first)
+
+    def test_raising_something_other_than_skip_is_not_a_skip(self):
+        src = "def test_x():\n    raise NotImplementedError\n"
+        self.assertEqual(rules(src), ["no-assertion"])
+
+    def test_a_production_method_called_skip_is_not_a_skip(self):
+        src = "def test_x():\n    stream.skip(4)\n"
+        self.assertEqual(rules(src), ["no-assertion"])
+
 
 class TestSeverity(unittest.TestCase):
     def test_empty_and_tautology_are_high(self):
@@ -421,6 +542,16 @@ class TestSuppression(unittest.TestCase):
         self.assertEqual(report.findings, [])
         self.assertEqual(len(report.suppressed), 1)
 
+    def test_ignore_after_another_tool_s_pragma_in_the_same_comment(self):
+        """Python ends a line with at most one comment, so a second pragma
+        shares the comment token of the first: `# noqa: B011  # suiteaudit:
+        ignore[...]` is how a line carrying both is written."""
+        src = ("def test_x():\n"
+               "    assert True  # noqa: B011  # suiteaudit: ignore[tautology]\n")
+        report = analyse_file(src, "t.py")
+        self.assertEqual(report.findings, [])
+        self.assertEqual([f.rule for f in report.suppressed], ["tautology"])
+
     # --- must NOT suppress ---------------------------------------------
     def test_ignore_for_a_different_rule_does_not_suppress(self):
         src = "def test_x():  # suiteaudit: ignore[mock-only]\n    assert True\n"
@@ -445,10 +576,6 @@ class TestSuppression(unittest.TestCase):
         src = "def test_x():  # suiteaudit: ignore\n    assert True\n"
         findings, n = analyse_source(src, "t.py")
         self.assertEqual((findings, n), ([], 1))
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
 
 
 class TestSecondMeasurementFalsePositives(unittest.TestCase):
@@ -1054,3 +1181,129 @@ def test_x():
     m.thing.assert_called_once()
 """
         self.assertEqual(rules(src), ["mock-only"])
+
+
+class TestFindingsNameTheirTest(unittest.TestCase):
+    """A finding is only actionable if it says where: the report prints
+    `file:line`, and `n_failing_tests` counts distinct `(file, test)` pairs."""
+
+    def test_every_rule_reports_its_test_file_and_line(self):
+        src = """
+class TestA(unittest.TestCase):
+    def test_empty(self):
+        pass
+
+    def test_smoke(self):
+        compute()
+
+    def test_mock(self):
+        m = Mock()
+        m()
+        m.assert_called_once()
+
+    def test_constant(self):
+        compute()
+        assert True
+
+@custom_runner
+def test_wrapped():
+    pass
+"""
+        findings, _ = analyse_source(src, "tests/test_a.py")
+        self.assertEqual(
+            sorted((f.rule, f.severity, f.test, f.file, f.line) for f in findings),
+            [("empty-test", "high", "TestA.test_empty", "tests/test_a.py", 3),
+             ("empty-test", "low", "test_wrapped", "tests/test_a.py", 19),
+             ("mock-only", "high", "TestA.test_mock", "tests/test_a.py", 9),
+             ("no-assertion", "medium", "TestA.test_smoke", "tests/test_a.py", 6),
+             ("tautology", "high", "TestA.test_constant", "tests/test_a.py", 16)])
+        for f in findings:
+            self.assertTrue(f.detail and f.evidence, f.rule)
+
+
+class TestCallsThatAreNotAssertions(unittest.TestCase):
+    """Only assertion helpers are candidates for `tautology`. Production
+    calls take constant arguments all the time."""
+
+    def test_constant_arguments_to_production_code_are_not_a_tautology(self):
+        src = "def test_x():\n    assert add(2, 2) == 4\n    assert scale(0) == 0\n"
+        self.assertEqual(rules(src), [])
+
+    def test_a_call_through_a_subscript_is_not_an_assertion(self):
+        # `handlers[0]` has no name to judge; it is production code.
+        src = "def test_x():\n    handlers[0](event)\n"
+        self.assertEqual(rules(src), ["no-assertion"])
+
+    def test_pytest_warns_and_deprecated_call_are_assertions(self):
+        for helper in ("pytest.warns(DeprecationWarning)", "pytest.deprecated_call()"):
+            src = f"def test_x():\n    with {helper}:\n        old_api()\n"
+            self.assertEqual(rules(src), [], helper)
+
+
+class TestMockOnlyLooksAtTheWholeTest(unittest.TestCase):
+    """`mock-only` must weigh every assertion and every call in the body,
+    not stop at the first one that concerns the mock."""
+
+    def test_a_real_assertion_after_a_mock_assertion_clears_the_test(self):
+        # `config` is a fixture argument, not a mock; the second assertion
+        # checks it, so the test can fail through something real.
+        for kind, first, second in (
+                ("mock method", "m.assert_called_once()",
+                 "self.assertTrue(config.enabled)"),
+                ("helper on the mock", "self.assertTrue(m.called)",
+                 "self.assertTrue(config.enabled)"),
+                ("bare assert", "assert m.called", "assert config.enabled")):
+            src = (f"def test_x(self, config):\n    m = Mock()\n    m(config.value)\n"
+                   f"    {first}\n    {second}\n")
+            self.assertEqual(rules(src), [], kind)
+
+    def test_production_code_nested_in_a_mock_call_counts(self):
+        src = """
+def test_x():
+    m = Mock()
+    m.send(build_payload())
+    m.send.assert_called_once()
+"""
+        self.assertEqual(rules(src), [])
+
+    def test_production_code_nested_in_a_builtin_call_counts(self):
+        src = """
+def test_x():
+    m = Mock()
+    rows = list(fetch_rows(m))
+    m.execute.assert_called_once()
+"""
+        self.assertEqual(rules(src), [])
+
+    def test_a_factory_that_returns_a_callable_is_production_code(self):
+        src = """
+def test_x():
+    m = Mock()
+    make_handler()(m)
+    m.assert_called_once()
+"""
+        self.assertEqual(rules(src), [])
+
+    def test_a_builtin_assignment_before_the_mock_does_not_hide_it(self):
+        src = """
+def test_x():
+    expected = dict(a=1)
+    m = MagicMock()
+    m(**expected)
+    m.assert_called_once_with(**expected)
+"""
+        self.assertEqual(rules(src), ["mock-only"])
+
+    def test_a_bare_assertion_function_on_a_mock_is_still_mock_only(self):
+        # nose-style `assert_true`, called without `self`.
+        src = """
+def test_x():
+    m = Mock()
+    m()
+    assert_true(m.called)
+"""
+        self.assertEqual(rules(src), ["mock-only"])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

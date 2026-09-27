@@ -4,6 +4,40 @@ All notable changes to SuiteAudit are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `tautology` reports `assert (x == 1, "msg")`: the parentheses make the
+  assertion a non-empty tuple, which is always true. `assert (x == 1), "msg"`
+  is not reported, nor a tuple that may be empty (`(*xs,)`).
+
+### Fixed
+
+- A test file saved with a UTF-8 byte order mark, or declaring its encoding
+  with a PEP 263 comment (`# -*- coding: latin-1 -*-`), was reported as
+  unparsed and left unchecked, though Python runs both. Files are now decoded
+  the way the interpreter decodes them.
+- `# suiteaudit: ignore` was honoured only at the start of a comment, so on a
+  line that also carried another tool's pragma (`# noqa: B011  # suiteaudit:
+  ignore[tautology]`) it was silently ignored and the finding stood.
+- A pytest fixture named like a test (`@pytest.fixture def test_client():`)
+  was counted as a test and reported as `no-assertion`. pytest does not
+  collect it, and neither does this tool now. In the README's measurement
+  this removes one false `no-assertion` from pytest's suite
+  (`TestClassicOutputStyle.test_files`); no other suite changes.
+- A class that opts out of pytest collection with `__test__ = False` had its
+  methods reported as tests.
+- Test classes nested in a plain test class (`class TestOuter: class
+  TestInner:`), which pytest collects, were skipped: their tests were neither
+  counted nor checked. They are now reported as `TestOuter.TestInner.test_x`.
+  Classes nested in a `unittest.TestCase`, which no runner collects, are
+  still left out.
+- A test whose body only skips (`pytest.skip(...)`, `self.skipTest(...)`,
+  `pytest.xfail(...)`, `raise SkipTest`) was reported as `no-assertion`,
+  though a runner reports it as skipped and `explain empty-test` recommends
+  exactly that for a placeholder.
+
 ## [0.1.0] - 2026-09-07
 
 The first release. Before tagging it, the release candidate was run against the

@@ -10,8 +10,10 @@ that is exactly how a broken checker goes unnoticed.
 from __future__ import annotations
 
 import fnmatch
+import io
 import json
 import os
+import tokenize
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
@@ -130,6 +132,19 @@ def iter_test_files(root: str, skip: set[str] | None = None,
             yield path
 
 
+def read_source(path: str) -> str:
+    """Decode a Python file the way the interpreter does: a UTF-8 byte order
+    mark or a PEP 263 coding declaration (`# -*- coding: latin-1 -*-`) picks
+    the encoding, and UTF-8 is the default. Raises SyntaxError for a bad
+    declaration and UnicodeDecodeError for bytes the encoding cannot read."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    encoding, _ = tokenize.detect_encoding(io.BytesIO(raw).readline)
+    # "utf-8-sig" when a BOM is present, so the BOM is stripped here; left in,
+    # ast.parse rejects it as a stray character.
+    return raw.decode(encoding)
+
+
 def audit(root: str, skip: set[str] | None = None,
           exclude: Sequence[str] = ()) -> AuditResult:
     """Audit one file or directory tree. `exclude` holds globs, matched by
@@ -138,16 +153,15 @@ def audit(root: str, skip: set[str] | None = None,
     for path in iter_test_files(root, skip, exclude):
         shown = os.path.relpath(path, root) if os.path.isdir(root) else path
         try:
-            with open(path, encoding="utf-8") as fh:
-                source = fh.read()
+            source = read_source(path)
         except OSError as exc:
             result.unparsed.append((path, str(exc)))
             continue
-        except UnicodeDecodeError as exc:
-            # A file that is not UTF-8 is a file the tool did not check, and
-            # the report says so. It is not a reason to abandon every other
-            # file in the run.
-            result.unparsed.append((path, f"not utf-8: {exc}"))
+        except (UnicodeDecodeError, SyntaxError) as exc:
+            # A file Python itself could not decode is a file the tool did not
+            # check, and the report says so. It is not a reason to abandon
+            # every other file in the run.
+            result.unparsed.append((path, f"cannot decode: {exc}"))
             continue
         try:
             report = analyse_file(source, shown)
